@@ -20,14 +20,20 @@ The site works without an account. Guest watchlists stay in that browser's local
 2. Add the project's URL and public anon/publishable key to `.env` as `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`. These client-side values are public; never use a service-role key in this app.
 3. In the Supabase SQL Editor, run [`supabase/schema.sql`](./supabase/schema.sql) to create the watchlist table and per-user row security policies.
 4. Run [`supabase/watched.sql`](./supabase/watched.sql) to create the separate watched-movie table and its per-user row security policies.
-5. In Supabase Authentication settings, configure the site's local and deployed redirect URLs and choose whether email confirmation is required.
-6. In Authentication → URL Configuration, add the local and deployed site URLs as allowed redirect URLs for password recovery and email confirmation.
-7. Deploy the account-deletion Edge Function from the project root with the Supabase CLI: `supabase functions deploy delete-account`. Supabase supplies the function's server-side `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`; never put the service-role key in `.env` or browser code.
-8. Restart the dev server. Use **SIGN IN** to create an account or sign in. Existing guest lists are merged into the account after sign-in.
+5. Run [`supabase/streak.sql`](./supabase/streak.sql) to create the daily Movie-of-the-Day streak history table and its per-user row security policies.
+6. Run [`supabase/profile.sql`](./supabase/profile.sql) to enable profile pictures, banners, and favorite films with per-user profile policies and a public image bucket.
+7. In Supabase Authentication settings, configure the site's local and deployed redirect URLs and choose whether email confirmation is required.
+8. In Authentication → URL Configuration, add the local and deployed site URLs as allowed redirect URLs for password recovery and email confirmation.
+9. Deploy the account-deletion Edge Function from the project root with the Supabase CLI: `supabase functions deploy delete-account`. Supabase supplies the function's server-side `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`; never put the service-role key in `.env` or browser code.
+10. Restart the dev server. Use **SIGN IN** to create an account or sign in. Existing guest lists are merged into the account after sign-in.
 
 Signed-in watchlists and watched films are stored in Supabase and are available on other devices after signing in. Guest watchlists and watched films stay in browser localStorage; each is merged into the matching account table on sign-in and cleared from local storage after a successful migration. Signing out returns to guest mode with separate local-only lists.
 
-The **WATCHED** action marks the current film as watched, then finds another random film. Future random selections exclude the user's saved watched films, today's pick, and random picks already shown during the current visit. The deterministic Movie of the Day remains the same for everyone.
+The daily streak counts consecutive UTC dates on which the Movie of the Day is marked watched. Random movies do not extend it. Guest streaks stay in browser localStorage and merge into the account after sign-in; account streak history syncs across devices. Existing watched movies are not backfilled into streak history.
+
+Choosing **WATCHED** opens a small rating/review dialog. A half-star rating and optional review are saved with the film when you confirm; you can also skip the review or cancel. The Watched page lets you adjust or clear ratings and displays saved review text. Ratings/reviews use the existing watched movie data in localStorage or the user's Supabase row, so no additional SQL setup is needed. After saving, the app finds another random film. Future random selections exclude the user's saved watched films, today's pick, and random picks already shown during the current visit. The deterministic Movie of the Day remains the same for everyone.
+
+The Profile page shows a personal film print with watched count, average rating, liked-film count, and your three highest-rated films. Profile settings let you upload a picture and banner and select up to four favorite films through TMDB search. Profile images are resized to WebP and stored in the public `profile-media` Supabase bucket for signed-in accounts; guest profile data is kept in localStorage. Run `supabase/profile.sql` before using account profile customization. Profile settings can also import a Letterboxd diary CSV into the watched-film list. Export your data from Letterboxd, then choose the CSV in the app. Entries are matched through TMDB using exact normalized title and release year; unmatched or ambiguous entries are skipped, and duplicate/already-watched films are not added again. Imports are limited to 500 unique entries per file.
 
 Account settings include password-reset email, password update after following its link, and a confirmed account deletion. Deletion uses the deployed Edge Function so the service-role key remains server-side. TMDB API/image failures and synced-list failures show retry actions.
 

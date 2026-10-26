@@ -11,20 +11,20 @@ alter table public.watchlist enable row level security;
 drop policy if exists "Users can read their own watchlist" on public.watchlist;
 create policy "Users can read their own watchlist"
   on public.watchlist for select
-  using (auth.uid() = user_id);
+  using ((select auth.uid()) = user_id);
 
 drop policy if exists "Users can add to their own watchlist" on public.watchlist;
 create policy "Users can add to their own watchlist"
   on public.watchlist for insert
-  with check (auth.uid() = user_id);
+  with check ((select auth.uid()) = user_id);
 
 drop policy if exists "Users can update their own watchlist" on public.watchlist;
 create policy "Users can update their own watchlist"
   on public.watchlist for update
-  using (auth.uid() = user_id)
-  with check (auth.uid() = user_id);
+  using ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
 
 drop policy if exists "Users can remove from their own watchlist" on public.watchlist;
 create policy "Users can remove from their own watchlist"
   on public.watchlist for delete
-  using (auth.uid() = user_id);
+  using ((select auth.uid()) = user_id);

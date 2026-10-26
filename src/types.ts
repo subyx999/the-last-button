@@ -6,6 +6,9 @@ export interface Movie {
   poster_path?: string | null
   backdrop_path?: string | null
   vote_average?: number
+  user_rating?: number | null
+  user_review?: string
+  user_liked?: boolean
   runtime?: number | null
   genres?: Array<{ id: number; name: string }>
   tagline?: string

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Movie } from '../types'
 import { supabase } from '../services/supabase'
 
@@ -22,6 +22,8 @@ export function useWatched(userId: string | undefined) {
   const [loading, setLoading] = useState(Boolean(userId))
   const [error, setError] = useState('')
   const [reloadKey, setReloadKey] = useState(0)
+  const moviesRef = useRef(movies)
+  moviesRef.current = movies
 
   useEffect(() => {
     let active = true
@@ -123,6 +125,113 @@ export function useWatched(userId: string | undefined) {
     }
   }
 
+  const addMany = async (newMovies: Movie[]): Promise<boolean> => {
+    setError('')
+    const uniqueMovies = [...new Map(newMovies.map((movie) => [movie.id, movie])).values()]
+    const previousMovies = moviesRef.current
+    const additions = uniqueMovies.filter((movie) => !previousMovies.some((saved) => saved.id === movie.id))
+    if (!additions.length) return true
+
+    const nextMovies = [...additions, ...previousMovies]
+    moviesRef.current = nextMovies
+    setMovies(nextMovies)
+
+    if (!userId) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextMovies))
+        return true
+      } catch (cause) {
+        moviesRef.current = previousMovies
+        setMovies(previousMovies)
+        setError(cause instanceof Error ? cause.message : 'Could not save imported watched films.')
+        return false
+      }
+    }
+
+    if (!supabase) {
+      moviesRef.current = previousMovies
+      setMovies(previousMovies)
+      setError('Account watched lists are unavailable because Supabase is not configured.')
+      return false
+    }
+
+    try {
+      const { error: saveError } = await supabase
+        .from('watched_movies')
+        .upsert(
+          additions.map((movie) => ({ user_id: userId, movie_id: movie.id, movie_data: movie })),
+          { onConflict: 'user_id,movie_id', ignoreDuplicates: true },
+        )
+      if (saveError) throw saveError
+      return true
+    } catch (cause) {
+      moviesRef.current = previousMovies
+      setMovies(previousMovies)
+      setError(cause instanceof Error ? cause.message : 'Could not sync imported watched films.')
+      return false
+    }
+  }
+
+  const setRating = async (movieId: number, rating: number | null, review?: string, liked?: boolean): Promise<boolean> => {
+    setError('')
+    if (rating !== null && (rating < 0.5 || rating > 5 || rating * 2 % 1 !== 0)) {
+      setError('Ratings must be between 0.5 and 5 stars in half-star steps.')
+      return false
+    }
+
+    const previousMovies = moviesRef.current
+    const movie = previousMovies.find((saved) => saved.id === movieId)
+    if (!movie) {
+      setError('Could not find this film in your watched list.')
+      return false
+    }
+
+    const updatedMovie: Movie = {
+      ...movie,
+      user_rating: rating,
+      ...(review === undefined ? {} : { user_review: review }),
+      ...(liked === undefined ? {} : { user_liked: liked }),
+    }
+    const nextMovies = previousMovies.map((saved) => saved.id === movieId ? updatedMovie : saved)
+    moviesRef.current = nextMovies
+    setMovies(nextMovies)
+
+    if (!userId) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextMovies))
+        return true
+      } catch (cause) {
+        moviesRef.current = previousMovies
+        setMovies(previousMovies)
+        setError(cause instanceof Error ? cause.message : 'Could not save this rating.')
+        return false
+      }
+    }
+
+    if (!supabase) {
+      moviesRef.current = previousMovies
+      setMovies(previousMovies)
+      setError('Account watched lists are unavailable because Supabase is not configured.')
+      return false
+    }
+
+    try {
+      const { error: saveError } = await supabase
+        .from('watched_movies')
+        .upsert(
+          { user_id: userId, movie_id: movieId, movie_data: updatedMovie },
+          { onConflict: 'user_id,movie_id' },
+        )
+      if (saveError) throw saveError
+      return true
+    } catch (cause) {
+      moviesRef.current = previousMovies
+      setMovies(previousMovies)
+      setError(cause instanceof Error ? cause.message : 'Could not sync this rating.')
+      return false
+    }
+  }
+
   const removeWatched = async (movie: Movie) => {
     setError('')
     const previousMovies = movies
@@ -157,5 +266,5 @@ export function useWatched(userId: string | undefined) {
     }
   }
 
-  return { movies, contains, loading, error, markWatched, removeWatched, retry: () => setReloadKey((key) => key + 1) }
+  return { movies, contains, loading, error, markWatched, addMany, setRating, removeWatched, retry: () => setReloadKey((key) => key + 1) }
 }

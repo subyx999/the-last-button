@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { getMovie, getMovieOfTheDay, getRandomMovie, imageUrl } from './services/tmdb'
+import { findExactMovie, getMovie, getMovieOfTheDay, getRandomMovie, imageUrl, searchMovies } from './services/tmdb'
+import { parseLetterboxdDiary } from './services/letterboxd'
 import { useWatchlist } from './hooks/useWatchlist'
 import { useWatched } from './hooks/useWatched'
+import { useDailyStreak } from './hooks/useDailyStreak'
 import { useAuth } from './hooks/useAuth'
+import { profileImageUrl, useProfile } from './hooks/useProfile'
+import ProfileEditor from './components/ProfileEditor'
 import { supabase, SUPABASE_SETUP_MESSAGE } from './services/supabase'
 import type { Movie } from './types'
 
-type Screen = 'home' | 'watchlist' | 'watched' | 'detail' | 'auth'
+type Screen = 'home' | 'watchlist' | 'watched' | 'detail' | 'auth' | 'settings'
 type AuthMode = 'sign-in' | 'sign-up' | 'reset-password' | 'update-password'
 type RetryTarget = 'daily' | 'random' | { detail: Movie } | null
 
@@ -45,6 +49,38 @@ function metadataNote(movie: Movie) {
   return 'The archive has no verified trivia for this title yet.'
 }
 
+function RatingStars({ rating, onRate, label, disabled }: {
+  rating: number | null | undefined
+  onRate: (value: number | null) => void
+  label: string
+  disabled: boolean
+}) {
+  return (
+    <div className="star-rating" role="group" aria-label={`${label}: ${rating ? `${rating} out of 5 stars` : 'not rated'}`}>
+      {[1, 2, 3, 4, 5].map((star) => {
+        const fill = Math.max(0, Math.min(100, ((rating ?? 0) - star + 1) * 100))
+        return (
+          <button
+            className="rating-star"
+            key={star}
+            type="button"
+            aria-label={`Rate ${label} ${star - 0.5} or ${star} stars`}
+            title={`${star - 0.5}–${star} stars`}
+            disabled={disabled}
+            onClick={(event) => {
+              const bounds = event.currentTarget.getBoundingClientRect()
+              const value = star - (event.clientX < bounds.left + bounds.width / 2 ? 0.5 : 0)
+              onRate(rating === value ? null : value)
+            }}
+          >
+            <span style={{ backgroundImage: `linear-gradient(90deg, var(--red) ${fill}%, #bdb9ae ${fill}%)` }}>★</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function App() {
   const [screen, setScreen] = useState<Screen>('home')
   const [featured, setFeatured] = useState<Movie | null>(null)
@@ -59,10 +95,23 @@ function App() {
   const [authMessage, setAuthMessage] = useState('')
   const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [deleteBusy, setDeleteBusy] = useState(false)
+  const [diaryImportBusy, setDiaryImportBusy] = useState(false)
+  const [diaryImportProgress, setDiaryImportProgress] = useState('')
+  const [diaryImportMessage, setDiaryImportMessage] = useState('')
+  const [diaryImportReport, setDiaryImportReport] = useState<{ imported: number; alreadySaved: number; skipped: number } | null>(null)
+  const [pendingWatchedMovie, setPendingWatchedMovie] = useState<Movie | null>(null)
+  const [pendingRating, setPendingRating] = useState<number | null>(null)
+  const [pendingReview, setPendingReview] = useState('')
+  const [pendingLiked, setPendingLiked] = useState(false)
+  const [favoriteSearch, setFavoriteSearch] = useState('')
+  const [favoriteResults, setFavoriteResults] = useState<Movie[]>([])
+  const [favoriteSearchBusy, setFavoriteSearchBusy] = useState(false)
+  const [favoriteSearchError, setFavoriteSearchError] = useState('')
   const [utcDate, setUtcDate] = useState(() => utcDateKey())
   const randomMovieIds = useRef(new Set<number>())
   const retryTarget = useRef<RetryTarget>(null)
   const { user, loading: authLoading, error: sessionError, passwordRecovery, clearPasswordRecovery, clearError: clearSessionError, setError: setSessionError } = useAuth()
+  const { profile, loading: profileLoading, error: profileError, saveProfile, updateImage } = useProfile(user?.id)
   const { movies: watchlist, contains, toggle, loading: watchlistLoading, error: watchlistError, retry: retryWatchlist } = useWatchlist(user?.id)
   const {
     movies: watchedMovies,
@@ -70,12 +119,58 @@ function App() {
     loading: watchedLoading,
     error: watchedError,
     markWatched,
+    addMany: addWatchedMany,
+    setRating: setWatchedRating,
     removeWatched,
     retry: retryWatched,
   } = useWatched(user?.id)
+  const {
+    current: dailyStreak,
+    best: bestDailyStreak,
+    loading: streakLoading,
+    error: streakError,
+    markTodayWatched,
+    retry: retryStreak,
+  } = useDailyStreak(user?.id, utcDate)
   const dateLabel = new Intl.DateTimeFormat('en', {
     weekday: 'long', day: '2-digit', month: 'long', timeZone: 'UTC',
   }).format(new Date(`${utcDate}T00:00:00.000Z`))
+  const ratedMovies = watchedMovies
+    .filter((movie): movie is Movie & { user_rating: number } => movie.user_rating !== null && movie.user_rating !== undefined)
+    .sort((a, b) => b.user_rating - a.user_rating)
+  const topRatedMovies = ratedMovies.slice(0, 3)
+  const averageRating = ratedMovies.length
+    ? (ratedMovies.reduce((total, movie) => total + movie.user_rating, 0) / ratedMovies.length).toFixed(1)
+    : '—'
+  const likedMovieCount = watchedMovies.filter((movie) => movie.user_liked).length
+
+  useEffect(() => {
+    const query = favoriteSearch.trim()
+    if (query.length < 2) {
+      setFavoriteResults([])
+      setFavoriteSearchBusy(false)
+      setFavoriteSearchError('')
+      return
+    }
+
+    let active = true
+    const timer = window.setTimeout(() => {
+      setFavoriteSearchBusy(true)
+      setFavoriteSearchError('')
+      searchMovies(query).then((movies) => {
+        if (active) setFavoriteResults(movies)
+      }).catch((cause: unknown) => {
+        if (active) setFavoriteSearchError(cause instanceof Error ? cause.message : 'Could not search TMDB.')
+      }).finally(() => {
+        if (active) setFavoriteSearchBusy(false)
+      })
+    }, 280)
+
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [favoriteSearch])
 
   useEffect(() => {
     const checkForUtcDateChange = () => {
@@ -146,17 +241,82 @@ function App() {
     }
   }
 
-  async function markWatchedAndDiscover(movie: Movie) {
+  function requestWatched(movie: Movie) {
+    setPendingWatchedMovie(movie)
+    setPendingRating(movie.user_rating ?? null)
+    setPendingReview(movie.user_review ?? '')
+    setPendingLiked(movie.user_liked ?? false)
+  }
+
+  async function markWatchedAndDiscover(movie: Movie, rating: number | null, review: string, liked: boolean): Promise<boolean> {
     setBusy(true)
     setError('')
-    const saved = await markWatched(movie)
+    const movieToSave = { ...movie, user_rating: rating, user_review: review.trim(), user_liked: liked }
+    const saved = hasWatched(movie.id)
+      ? await setWatchedRating(movie.id, rating, review.trim(), liked)
+      : await markWatched(movieToSave)
     if (!saved) {
       setBusy(false)
-      return
+      return false
+    }
+
+    if (featured?.id === movie.id) {
+      const streakSaved = await markTodayWatched(movie.id, utcDateKey())
+      if (!streakSaved) {
+        setBusy(false)
+        return false
+      }
     }
 
     randomMovieIds.current.add(movie.id)
+    setPendingWatchedMovie(null)
     await discoverRandom(new Set([movie.id]))
+    return true
+  }
+
+  async function importLetterboxdDiary(file: File) {
+    setDiaryImportBusy(true)
+    setDiaryImportProgress('Reading diary…')
+    setDiaryImportMessage('')
+    setDiaryImportReport(null)
+
+    try {
+      if (file.size > 5 * 1024 * 1024) throw new Error('This CSV is larger than 5 MB. Split the export into smaller files and try again.')
+      const entries = parseLetterboxdDiary(await file.text())
+      const matchedMovies = new Map<number, Movie>()
+      let alreadySaved = 0
+      let skipped = 0
+
+      for (const [index, entry] of entries.entries()) {
+        setDiaryImportProgress(`Matching ${index + 1} of ${entries.length}: ${entry.title}`)
+        if (index > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, 250))
+        const movie = await findExactMovie(entry.title, entry.year)
+        if (!movie) {
+          skipped += 1
+        } else if (hasWatched(movie.id) || matchedMovies.has(movie.id)) {
+          alreadySaved += 1
+        } else {
+          matchedMovies.set(movie.id, movie)
+        }
+      }
+
+      const additions = [...matchedMovies.values()]
+      const saved = await addWatchedMany(additions)
+      if (!saved) {
+        setDiaryImportMessage('The matching films were found, but could not be saved. Check the sync error above and try again.')
+        setDiaryImportReport({ imported: 0, alreadySaved, skipped })
+        setDiaryImportProgress('')
+        return
+      }
+
+      setDiaryImportReport({ imported: additions.length, alreadySaved, skipped })
+      setDiaryImportProgress('')
+    } catch (cause) {
+      setDiaryImportMessage(cause instanceof Error ? cause.message : 'Could not import this diary file.')
+      setDiaryImportProgress('')
+    } finally {
+      setDiaryImportBusy(false)
+    }
   }
 
   async function openMovie(movie: Movie) {
@@ -287,6 +447,11 @@ function App() {
   }
 
   const currentMovie = screen === 'detail' ? selected : featured
+  const trailer = currentMovie?.videos?.results?.find(
+    (video) => video.site === 'YouTube' && video.type === 'Trailer',
+  ) ?? currentMovie?.videos?.results?.find(
+    (video) => video.site === 'YouTube' && video.type === 'Teaser',
+  )
 
   return (
     <main className="site-shell">
@@ -302,8 +467,8 @@ function App() {
           <button className={`watchlist-link ${screen === 'watched' ? 'is-current' : ''}`} onClick={() => setScreen('watched')}>
             WATCHED <span className="watchlist-count">{watchedMovies.length.toString().padStart(2, '0')}</span>
           </button>
-          <button className={`account-link ${screen === 'auth' ? 'is-current' : ''}`} onClick={() => { setAuthMessage(''); setScreen('auth') }}>
-            {authLoading ? 'ACCOUNT…' : user ? 'ACCOUNT' : 'SIGN IN'}
+          <button className={`account-link ${screen === 'auth' || screen === 'settings' ? 'is-current' : ''}`} onClick={() => { setAuthMessage(''); setScreen('auth') }}>
+            {authLoading ? 'PROFILE…' : user ? 'PROFILE' : 'SIGN IN'}
           </button>
         </div>
       </header>
@@ -319,6 +484,7 @@ function App() {
       {sessionError && <ErrorNotice message={sessionError} />}
       {watchlistError && <ErrorNotice message={watchlistError} onRetry={retryWatchlist} disabled={watchlistLoading} />}
       {watchedError && <ErrorNotice message={watchedError} onRetry={retryWatched} disabled={watchedLoading} />}
+      {streakError && <ErrorNotice message={streakError} onRetry={() => { void retryStreak() }} disabled={streakLoading} />}
       {error && <ErrorNotice
         message={error}
         onRetry={retryTarget.current ? () => { void retryFailedRequest() } : undefined}
@@ -342,18 +508,24 @@ function App() {
                 <button className="button button-dark" onClick={() => featured && openMovie(featured)} disabled={!featured || loading}>
                   {loading ? 'TUNING IN…' : 'VIEW TODAY’S PICK'} <span aria-hidden="true">↗</span>
                 </button>
-                <button className="button button-dark" onClick={() => featured && void markWatchedAndDiscover(featured)} disabled={busy || loading || !featured || watchedLoading}>
-                  {busy ? 'PICKING…' : featured && hasWatched(featured.id) ? 'ALREADY WATCHED' : 'WATCHED'} <span aria-hidden="true">↗</span>
+                <button className="button button-dark" onClick={() => featured && requestWatched(featured)} disabled={busy || loading || !featured || watchedLoading || streakLoading}>
+                  {busy ? 'PICKING…' : featured && hasWatched(featured.id) ? 'LOG REWATCH' : 'WATCHED'} <span aria-hidden="true">↗</span>
                 </button>
               </div>
-              <div className="hero-footnote"><span>DECISION AUTHORITY: REVOKED</span><span>01 / 01</span></div>
+              <div className="hero-footnote">
+                <span>DECISION AUTHORITY: REVOKED</span>
+                <span className="streak-count" aria-label={`${dailyStreak} day current streak, ${bestDailyStreak} day best streak`}>
+                  STREAK {dailyStreak} / BEST {bestDailyStreak}
+                </span>
+                <span>01 / 01</span>
+              </div>
             </div>
 
             <div className="poster-stage">
               <div className="stage-index">FRAME<br />{featured ? String(featured.id).padStart(6, '0') : '———'}</div>
               <div className="poster-wrap">
                 {featured?.poster_path
-                  ? <img src={imageUrl(featured.poster_path)} alt={`${featured.title} theatrical poster`} className="poster-image" />
+                  ? <img src={imageUrl(featured.poster_path)} alt={`${featured.title} theatrical poster`} className="poster-image" fetchPriority="high" decoding="async" />
                   : <div className="image-placeholder"><span>{loading ? 'FETCHING<br />A FEELING' : 'IMAGE<br />MISSING'}</span></div>}
                 <span className="poster-stamp">TODAY<br />ONLY</span>
               </div>
@@ -375,7 +547,7 @@ function App() {
               {watchlist.map((movie, index) => (
                 <article className="watch-item" key={movie.id}>
                   <button className="watch-item-open" onClick={() => openMovie(movie)} aria-label={`Open ${movie.title}`}>
-                    {movie.poster_path ? <img src={imageUrl(movie.poster_path)} alt="" /> : <div className="image-placeholder">NO<br />IMAGE</div>}
+                    {movie.poster_path ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" /> : <div className="image-placeholder">NO<br />IMAGE</div>}
                     <span className="watch-item-index">{String(index + 1).padStart(2, '0')} / {yearOf(movie)}</span>
                     <h2>{movie.title}</h2>
                   </button>
@@ -398,12 +570,31 @@ function App() {
               {watchedMovies.map((movie, index) => (
                 <article className="watch-item" key={movie.id}>
                   <button className="watch-item-open" onClick={() => openMovie(movie)} aria-label={`Open ${movie.title}`}>
-                    {movie.poster_path ? <img src={imageUrl(movie.poster_path)} alt="" /> : <div className="image-placeholder">NO<br />IMAGE</div>}
+                    {movie.poster_path ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" /> : <div className="image-placeholder">NO<br />IMAGE</div>}
                     <span className="watch-item-index">{String(index + 1).padStart(2, '0')} / {yearOf(movie)}</span>
                     <h2>{movie.title}</h2>
                   </button>
-                  <button className="remove-button" onClick={() => { void removeWatched(movie) }} disabled={watchedLoading} aria-label={`Remove ${movie.title} from watched`}>
-                    REMOVE FROM WATCHED ×
+                  <RatingStars
+                    rating={movie.user_rating}
+                    onRate={(rating) => { void setWatchedRating(movie.id, rating) }}
+                    label={movie.title}
+                    disabled={watchedLoading}
+                  />
+                  <button
+                    className={`watch-item-like${movie.user_liked ? ' is-liked' : ''}`}
+                    type="button"
+                    aria-pressed={movie.user_liked ?? false}
+                    onClick={() => { void setWatchedRating(movie.id, movie.user_rating ?? null, movie.user_review, !movie.user_liked) }}
+                    disabled={watchedLoading}
+                  >
+                    {movie.user_liked ? '♥ LIKED' : '♡ LIKE'}
+                  </button>
+                  {movie.user_rating !== null && movie.user_rating !== undefined && (
+                    <span className="rating-value">{movie.user_rating} / 5</span>
+                  )}
+                  {movie.user_review?.trim() && <p className="watch-item-review">{movie.user_review}</p>}
+                  <button className="remove-button remove-icon" onClick={() => { void removeWatched(movie) }} disabled={watchedLoading} aria-label={`Remove ${movie.title} from watched`} title="Remove from watched">
+                    ×
                   </button>
                 </article>
               ))}
@@ -428,19 +619,37 @@ function App() {
               </div>
               <p className="detail-overview">{currentMovie.overview || 'No synopsis available from the archive.'}</p>
               <div className="detail-actions">
-                <button className="button button-light" onClick={() => { void toggle(currentMovie) }} disabled={watchlistLoading} aria-pressed={contains(currentMovie.id)}>
-                  {watchlistLoading ? 'SYNCING…' : contains(currentMovie.id) ? '− REMOVE FROM WATCHLIST' : '+ SAVE FOR LATER'}
-                </button>
-                <button className="button button-detail-random" onClick={() => void markWatchedAndDiscover(currentMovie)} disabled={busy || watchedLoading}>
-                  {busy ? 'PICKING…' : hasWatched(currentMovie.id) ? 'PICK ANOTHER' : 'WATCHED'} <span aria-hidden="true">↗</span>
-                </button>
+                {hasWatched(currentMovie.id) ? (
+                  <button className="button button-light" onClick={() => { void removeWatched(currentMovie) }} disabled={watchedLoading}>
+                    {watchedLoading ? 'UPDATING…' : 'REMOVE ×'}
+                  </button>
+                ) : (
+                  <>
+                    <button className="button button-light" onClick={() => { void toggle(currentMovie) }} disabled={watchlistLoading} aria-pressed={contains(currentMovie.id)}>
+                      {watchlistLoading ? 'SYNCING…' : contains(currentMovie.id) ? '− REMOVE FROM WATCHLIST' : '+ SAVE FOR LATER'}
+                    </button>
+                    <button className="button button-detail-random" onClick={() => requestWatched(currentMovie)} disabled={busy || watchedLoading || (featured?.id === currentMovie.id && streakLoading)}>
+                      {busy ? 'PICKING…' : 'WATCHED'} <span aria-hidden="true">↗</span>
+                    </button>
+                  </>
+                )}
               </div>
             </div>
-            {currentMovie.poster_path && <img className="detail-poster" src={imageUrl(currentMovie.poster_path)} alt={`${currentMovie.title} poster`} />}
+            {currentMovie.poster_path && <img className="detail-poster" src={imageUrl(currentMovie.poster_path)} alt={`${currentMovie.title} poster`} decoding="async" />}
           </div>
           {busy && <div className="loading-line">Opening the film file…</div>}
           <div className="detail-columns">
-            <section className="detail-fact"><span className="micro-label">A NOTE FROM THE ARCHIVE / METADATA</span><p>{metadataNote(currentMovie)}</p></section>
+            <section className="detail-fact">
+              <span className="micro-label">A NOTE FROM THE ARCHIVE / METADATA</span>
+              <p>{metadataNote(currentMovie)}</p>
+              {trailer ? (
+                <a className="button button-trailer" href={`https://www.youtube.com/watch?v=${trailer.key}`} target="_blank" rel="noreferrer">
+                  WATCH TRAILER ↗
+                </a>
+              ) : (
+                <p className="trailer-unavailable">NO TRAILER LISTED</p>
+              )}
+            </section>
             <section><span className="micro-label">THE PEOPLE</span><h2>In the frame.</h2><p className="cast-list">{currentMovie.credits?.cast?.slice(0, 8).map((person) => `${person.name} as ${person.character}`).join(' · ') || 'Cast details not available.'}</p>
               {currentMovie.credits?.crew?.find((person) => person.job === 'Director') && <p className="crew-line">DIRECTED BY / {currentMovie.credits.crew.find((person) => person.job === 'Director')?.name}</p>}
             </section>
@@ -450,20 +659,156 @@ function App() {
             {currentMovie.production_countries?.length ? <p><span className="micro-label">ORIGIN</span>{currentMovie.production_countries.map((country) => country.name).join(' · ')}</p> : null}
             {currentMovie.spoken_languages?.length ? <p><span className="micro-label">LANGUAGES</span>{currentMovie.spoken_languages.map((language) => language.english_name || language.name).join(' · ')}</p> : null}
           </div>
-          {currentMovie.videos?.results?.find((video) => video.site === 'YouTube' && video.type === 'Trailer') && (
-            <a className="trailer-link" href={`https://www.youtube.com/watch?v=${currentMovie.videos.results.find((video) => video.site === 'YouTube' && video.type === 'Trailer')?.key}`} target="_blank" rel="noreferrer">
-              WATCH THE TRAILER ↗
-            </a>
-          )}
         </section>
       )}
 
-      {screen === 'auth' && (
-        <section className="secondary-screen account-screen">
-          <p className="eyebrow"><span className="red-mark">✳</span> OPTIONAL ACCOUNT / YOUR CHOICE</p>
-          {passwordRecovery ? (
+      {(screen === 'auth' || screen === 'settings') && (
+        <section className="secondary-screen profile-screen">
+          <p className="eyebrow"><span className="red-mark">✳</span> {screen === 'settings' ? 'SETTINGS / ACCOUNT & PREFERENCES' : 'YOUR PROFILE / ACCOUNT OPTIONAL'}</p>
+          {screen === 'auth' && !passwordRecovery && (
             <>
-              <div className="secondary-heading"><h1>New password,<br /><em>fresh start.</em></h1><span>SECURE RESET</span></div>
+            <section className="profile-identity" style={profile.banner ? {
+              backgroundImage: `linear-gradient(90deg, rgba(23,23,21,.78), rgba(23,23,21,.38)), url("${profileImageUrl(profile.banner)}")`,
+            } : undefined}>
+              <div className="profile-identity-user">
+                {profile.avatar
+                  ? <img className="profile-avatar" src={profileImageUrl(profile.avatar)} alt="Your profile picture" />
+                  : <div className="profile-avatar profile-avatar-placeholder" aria-hidden="true">◉</div>}
+                <div>
+                  <span className="micro-label">YOUR FILM PROFILE</span>
+                  <h1>{user?.email?.split('@')[0] || 'CINEPHILE'}</h1>
+                  <p>{profile.favorites.length} / 4 FAVOURITE FILMS</p>
+                </div>
+              </div>
+              <span className="profile-identity-index">THE LAST BUTTON / PERSONAL ARCHIVE</span>
+            </section>
+            <section className="profile-film-print" aria-labelledby="film-print-title">
+              <div className="profile-film-print-heading">
+                <div>
+                  <span className="micro-label">A RECORD OF YOUR TASTE</span>
+                  <h2 id="film-print-title">Your film<br /><em>print.</em></h2>
+                </div>
+                <span className="profile-film-print-mark" aria-hidden="true">◉</span>
+              </div>
+              {watchedLoading ? (
+                <p className="profile-film-print-loading">DEVELOPING YOUR ARCHIVE…</p>
+              ) : (
+                <>
+                  <div className="profile-stat-grid">
+                    <div className="profile-stat"><strong>{watchedMovies.length}</strong><span>FILMS SEEN</span></div>
+                    <div className="profile-stat"><strong>{averageRating}</strong><span>AVG. RATING / 5</span></div>
+                    <div className="profile-stat"><strong>{ratedMovies.length}</strong><span>FILMS RATED</span></div>
+                    <div className="profile-stat"><strong>{likedMovieCount}</strong><span>IN YOUR HEART</span></div>
+                  </div>
+                  <div className="profile-top-films">
+                    <div className="profile-top-films-heading">
+                      <span className="micro-label">YOUR HIGHEST-RATED</span>
+                      <button className="text-button" onClick={() => setScreen('watched')} disabled={!watchedMovies.length}>OPEN WATCHED ↗</button>
+                    </div>
+                    {topRatedMovies.length ? (
+                      <div className="profile-top-films-list">
+                        {topRatedMovies.map((movie, index) => (
+                          <button className="profile-top-film" key={movie.id} onClick={() => { void openMovie(movie) }}>
+                            {movie.poster_path
+                              ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
+                              : <span className="profile-top-film-placeholder">NO<br />IMAGE</span>}
+                            <span className="profile-top-film-copy">
+                              <span className="profile-top-film-rank">0{index + 1} / {movie.user_rating} ★</span>
+                              <strong>{movie.title}</strong>
+                              <span>{yearOf(movie)}</span>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="profile-top-films-empty">
+                        {watchedMovies.length ? 'Rate a watched film to start your personal top three.' : 'Mark films watched and rate them to build your film print.'}
+                      </p>
+                    )}
+                  </div>
+                </>
+              )}
+            </section>
+            <section className="profile-favorites" aria-labelledby="profile-favorites-title">
+              <div className="profile-favorites-heading">
+                <div>
+                  <span className="micro-label">FOUR FILMS THAT STAY</span>
+                  <h2 id="profile-favorites-title">The favourites.</h2>
+                </div>
+                <span>{String(profile.favorites.length).padStart(2, '0')} / 04</span>
+              </div>
+              <div className="profile-favorites-grid">
+                {[0, 1, 2, 3].map((slot) => {
+                  const movie = profile.favorites[slot]
+                  return movie ? (
+                    <button className="profile-favorite-film" key={movie.id} onClick={() => { void openMovie(movie) }}>
+                      {movie.poster_path
+                        ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
+                        : <span className="profile-favorite-placeholder">NO<br />IMAGE</span>}
+                      <span className="profile-favorite-title">{movie.title}</span>
+                      <span className="profile-favorite-year">{yearOf(movie)}</span>
+                    </button>
+                  ) : (
+                    <div className="profile-favorite-empty" key={`empty-${slot}`}>
+                      <span>0{slot + 1}</span>
+                      <p>FAVOURITE<br />NOT SET</p>
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
+            <section className="profile-favorites profile-recent-films" aria-labelledby="profile-recent-title">
+              <div className="profile-favorites-heading">
+                <div>
+                  <span className="micro-label">FRESH FROM THE ARCHIVE</span>
+                  <h2 id="profile-recent-title">Recently watched.</h2>
+                </div>
+                <button className="text-button" onClick={() => setScreen('watched')} disabled={!watchedMovies.length}>OPEN WATCHED ↗</button>
+              </div>
+              {watchedMovies.length ? (
+                <div className="profile-favorites-grid">
+                  {watchedMovies.slice(0, 4).map((movie) => (
+                    <button className="profile-favorite-film" key={movie.id} onClick={() => { void openMovie(movie) }}>
+                      {movie.poster_path
+                        ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
+                        : <span className="profile-favorite-placeholder">NO<br />IMAGE</span>}
+                      <span className="profile-favorite-title">{movie.title}</span>
+                      <span className="profile-favorite-year">{yearOf(movie)}</span>
+                      {movie.user_rating !== null && movie.user_rating !== undefined && (
+                        <span className="profile-favorite-year">{movie.user_rating} / 5 ★</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="profile-top-films-empty">Films you mark as watched will appear here.</p>
+              )}
+            </section>
+            </>
+          )}
+          {screen === 'auth' && !passwordRecovery && (
+            <div className="profile-settings-entry">
+              <p className="account-description">Account details, diary import, and profile controls live in settings.</p>
+              <button className="button button-dark" onClick={() => setScreen('settings')}>OPEN SETTINGS <span aria-hidden="true">↗</span></button>
+            </div>
+          )}
+          {screen === 'settings' && !passwordRecovery && (
+            <ProfileEditor
+              profile={profile}
+              loading={profileLoading}
+              error={profileError}
+              onSave={saveProfile}
+              onUpload={updateImage}
+              search={favoriteSearch}
+              setSearch={setFavoriteSearch}
+              results={favoriteResults}
+              searching={favoriteSearchBusy}
+              searchError={favoriteSearchError}
+            />
+          )}
+          {(screen === 'settings' || passwordRecovery) && (passwordRecovery ? (
+            <>
+              <div className="secondary-heading"><h1>Settings,<br /><em>password.</em></h1><span>SECURE RESET</span></div>
               <div className="account-panel">
                 <p className="account-description">Choose a new password for your account.</p>
                 <form className="auth-form" onSubmit={(event) => { void submitAuth(event) }}>
@@ -478,8 +823,12 @@ function App() {
             </>
           ) : user ? (
             <>
-              <div className="secondary-heading"><h1>Your films,<br /><em>in sync.</em></h1><span>ACCOUNT ACTIVE</span></div>
+              <div className="secondary-heading settings-page-heading"><h1>Settings,<br /><em>in order.</em></h1><span>ACCOUNT CONTROL</span></div>
               <div className="account-panel">
+                <div className="account-settings-heading">
+                  <span className="micro-label">ACCOUNT SETTINGS / PROFILE ACTIVE</span>
+                  <h2>Your films,<br /><em>in sync.</em></h2>
+                </div>
                 <span className="micro-label">SIGNED IN AS</span>
                 <p>{user.email}</p>
                 <p className="account-description">Your watchlist is saved to your account and available when you sign in on another device.</p>
@@ -502,7 +851,7 @@ function App() {
             </>
           ) : (
             <>
-              <div className="secondary-heading"><h1>{authMode === 'reset-password' ? <>Reset your<br /><em>password.</em></> : <>Keep your<br /><em>films close.</em></>}</h1><span>GUEST MODE ALWAYS AVAILABLE</span></div>
+              <div className="secondary-heading settings-page-heading"><h1>{authMode === 'reset-password' ? <>Reset your<br /><em>password.</em></> : <>Keep your<br /><em>films close.</em></>}</h1><span>GUEST MODE ALWAYS AVAILABLE</span></div>
               <div className="account-panel">
                 <p className="account-description">
                   {authMode === 'reset-password'
@@ -510,7 +859,7 @@ function App() {
                     : 'Sign in to sync your watchlist across devices, or keep using the site as a guest. Your existing guest lists will be added to your account when you sign in.'}
                 </p>
                 {!supabase && <div className="inline-error" role="status">{SUPABASE_SETUP_MESSAGE} Guest mode works without an account.</div>}
-                {authMode !== 'reset-password' && <div className="auth-tabs" role="group" aria-label="Account action">
+                {authMode !== 'reset-password' && <div className="auth-tabs" role="group" aria-label="Profile action">
                   <button className={authMode === 'sign-in' ? 'is-selected' : ''} onClick={() => { setAuthMode('sign-in'); setAuthMessage(''); clearSessionError() }}>SIGN IN</button>
                   <button className={authMode === 'sign-up' ? 'is-selected' : ''} onClick={() => { setAuthMode('sign-up'); setAuthMessage(''); clearSessionError() }}>CREATE ACCOUNT</button>
                 </div>}
@@ -530,9 +879,106 @@ function App() {
                 {authMode === 'reset-password' && <button className="text-button forgot-password" onClick={() => { setAuthMode('sign-in'); setAuthMessage(''); clearSessionError() }}>← BACK TO SIGN IN</button>}
               </div>
             </>
+          ))}
+          {screen === 'settings' && !passwordRecovery && (
+            <div className="diary-import">
+              <div>
+                <span className="micro-label">LETTERBOXD DIARY IMPORT</span>
+                <p>Bring your watched films over from a Letterboxd diary CSV. Only unique title-and-year matches are added; imports do not change your daily streak.</p>
+              </div>
+              <label className={`button button-dark diary-import-button${diaryImportBusy || watchedLoading ? ' is-disabled' : ''}`}>
+                {diaryImportBusy ? 'MATCHING DIARY…' : 'IMPORT DIARY CSV'}
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  disabled={diaryImportBusy || watchedLoading}
+                  onChange={(event) => {
+                    const file = event.currentTarget.files?.[0]
+                    event.currentTarget.value = ''
+                    if (file) void importLetterboxdDiary(file)
+                  }}
+                />
+              </label>
+              {diaryImportProgress && <p className="diary-import-status" role="status">{diaryImportProgress}</p>}
+              {diaryImportMessage && <p className="diary-import-error" role="alert">{diaryImportMessage}</p>}
+              {diaryImportReport && (
+                <p className="diary-import-status" role="status">
+                  Import complete: {diaryImportReport.imported} added, {diaryImportReport.alreadySaved} already watched, {diaryImportReport.skipped} skipped because no unique exact match was found.
+                </p>
+              )}
+            </div>
           )}
-          <button className="back-link" onClick={returnHome}>← CONTINUE AS {user ? 'SIGNED-IN USER' : 'GUEST'}</button>
+          {screen === 'settings'
+            ? <button className="back-link" onClick={() => setScreen('auth')}>← BACK TO PROFILE</button>
+            : !passwordRecovery && <button className="back-link" onClick={returnHome}>← CONTINUE AS {user ? 'SIGNED-IN USER' : 'GUEST'}</button>}
         </section>
+      )}
+      {pendingWatchedMovie && (
+        <div
+          className="review-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !busy) setPendingWatchedMovie(null)
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape' && !busy) setPendingWatchedMovie(null)
+          }}
+        >
+          <section
+            className="review-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="review-modal-title"
+            style={pendingWatchedMovie.backdrop_path ? {
+              backgroundImage: `linear-gradient(180deg, rgba(23,23,21,.78), rgba(23,23,21,.92)), url("${imageUrl(pendingWatchedMovie.backdrop_path, 'original')}")`,
+            } : undefined}
+          >
+            <button className="review-modal-close" type="button" onClick={() => setPendingWatchedMovie(null)} disabled={busy} aria-label="Close rating and review" autoFocus>×</button>
+            <p className="eyebrow"><span className="red-mark">✳</span> LOG</p>
+            <h2 id="review-modal-title">{pendingWatchedMovie.title}</h2>
+            <p className="review-modal-film"><span>RELEASED</span> {yearOf(pendingWatchedMovie)}</p>
+            <div className="review-modal-rating">
+              <div className="review-modal-rating-control">
+                <RatingStars
+                  rating={pendingRating}
+                  onRate={setPendingRating}
+                  label={pendingWatchedMovie.title}
+                  disabled={busy}
+                />
+                {pendingRating !== null && <span className="review-modal-rating-value">{pendingRating} / 5</span>}
+              </div>
+            </div>
+            <button
+              className={`review-modal-like${pendingLiked ? ' is-liked' : ''}`}
+              type="button"
+              aria-pressed={pendingLiked}
+              aria-label={pendingLiked ? 'Unlike this film' : 'Like this film'}
+              title={pendingLiked ? 'Unlike this film' : 'Like this film'}
+              onClick={() => setPendingLiked((liked) => !liked)}
+              disabled={busy}
+            >
+              <span aria-hidden="true">{pendingLiked ? '♥' : '♡'}</span>
+            </button>
+            <label className="review-modal-note">
+              <span className="micro-label">YOUR REVIEW</span>
+              <textarea
+                maxLength={2000}
+                value={pendingReview}
+                onChange={(event) => setPendingReview(event.target.value)}
+                placeholder="What stayed with you?"
+                disabled={busy}
+              />
+            </label>
+            <div className="review-modal-actions">
+              <button
+                className="button button-dark"
+                onClick={() => { void markWatchedAndDiscover(pendingWatchedMovie, pendingRating, pendingReview, pendingLiked) }}
+                disabled={busy}
+              >
+                {busy ? 'SAVING…' : 'LOG VIEWING'} <span aria-hidden="true">↗</span>
+              </button>
+            </div>
+          </section>
+        </div>
       )}
       <footer className="tmdb-attribution" aria-label="TMDB attribution">
         <a href="https://www.themoviedb.org" target="_blank" rel="noreferrer" aria-label="The Movie Database (TMDB)">

@@ -3,6 +3,19 @@ import type { Movie } from '../types'
 const API_ROOT = 'https://api.themoviedb.org/3'
 const API_KEY = import.meta.env.VITE_TMDB_API_KEY
 const DAILY_MOVIE_IDS = [11, 13, 28, 155, 238, 278, 424, 597, 603, 680, 550, 27205, 157336, 496243]
+const RESPONSE_CACHE_TTL_MS = 5 * 60 * 1000
+const RESPONSE_CACHE_LIMIT = 80
+const responseCache = new Map<string, { value: unknown; expiresAt: number }>()
+const pendingRequests = new Map<string, Promise<unknown>>()
+
+function normalizeMovieTitle(title: string) {
+  return title
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+}
 
 export function imageUrl(path: string | null | undefined, size: 'w500' | 'original' = 'w500') {
   return path ? `https://image.tmdb.org/t/p/${size}${path}` : ''
@@ -13,20 +26,67 @@ async function request<T>(endpoint: string): Promise<T> {
     throw new Error('TMDB is not connected yet. Add VITE_TMDB_API_KEY to a .env file, then restart the app.')
   }
 
+  const cached = responseCache.get(endpoint)
+  if (cached && cached.expiresAt > Date.now()) return cached.value as T
+  if (cached) responseCache.delete(endpoint)
+
+  const pending = pendingRequests.get(endpoint)
+  if (pending) return pending as Promise<T>
+
   const separator = endpoint.includes('?') ? '&' : '?'
-  const response = await fetch(`${API_ROOT}${endpoint}${separator}api_key=${encodeURIComponent(API_KEY)}&language=en-US`)
+  const requestPromise = (async () => {
+    const response = await fetch(`${API_ROOT}${endpoint}${separator}api_key=${encodeURIComponent(API_KEY)}&language=en-US`)
+    if (!response.ok) {
+      throw new Error(`TMDB could not load this movie (HTTP ${response.status}). Please try again.`)
+    }
 
-  if (!response.ok) {
-    throw new Error(`TMDB could not load this movie (HTTP ${response.status}). Please try again.`)
+    const value: unknown = await response.json()
+    if (responseCache.size >= RESPONSE_CACHE_LIMIT) {
+      const oldestKey = responseCache.keys().next().value
+      if (oldestKey !== undefined) responseCache.delete(oldestKey)
+    }
+    responseCache.set(endpoint, { value, expiresAt: Date.now() + RESPONSE_CACHE_TTL_MS })
+    return value
+  })()
+  pendingRequests.set(endpoint, requestPromise)
+  try {
+    return await requestPromise as T
+  } finally {
+    pendingRequests.delete(endpoint)
   }
-
-  return response.json() as Promise<T>
 }
 
 export async function getMovie(id: number): Promise<Movie> {
   const movie = await request<Movie>(`/movie/${id}?append_to_response=credits,videos`)
   if (!movie?.id || !movie.title) throw new Error('TMDB returned an incomplete movie. Please try again.')
   return movie
+}
+
+export async function findExactMovie(title: string, year: number): Promise<Movie | null> {
+  const query = new URLSearchParams({ query: title, year: String(year), include_adult: 'false' })
+  const result = await request<{ results?: Array<Movie & { original_title?: string }> }>(
+    `/search/movie?${query.toString()}`,
+  )
+  const normalizedTitle = normalizeMovieTitle(title)
+  const matches = new Map<number, Movie>()
+
+  for (const movie of result.results ?? []) {
+    const movieYear = movie.release_date?.slice(0, 4)
+    const titleMatches = [movie.title, movie.original_title].some(
+      (candidate) => candidate && normalizeMovieTitle(candidate) === normalizedTitle,
+    )
+    if (titleMatches && movieYear === String(year)) matches.set(movie.id, movie)
+  }
+
+  return matches.size === 1 ? [...matches.values()][0] : null
+}
+
+export async function searchMovies(query: string): Promise<Movie[]> {
+  const normalizedQuery = query.trim()
+  if (normalizedQuery.length < 2) return []
+  const params = new URLSearchParams({ query: normalizedQuery, include_adult: 'false', page: '1' })
+  const result = await request<{ results?: Movie[] }>(`/search/movie?${params.toString()}`)
+  return (result.results ?? []).filter((movie) => Boolean(movie.id && movie.title)).slice(0, 8)
 }
 
 export async function getMovieOfTheDay(date = new Date()): Promise<Movie> {
