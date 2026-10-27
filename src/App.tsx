@@ -664,8 +664,8 @@ function App() {
 
       {(screen === 'auth' || screen === 'settings') && (
         <section className="secondary-screen profile-screen">
-          <p className="eyebrow"><span className="red-mark">✳</span> {screen === 'settings' ? 'SETTINGS / ACCOUNT & PREFERENCES' : 'YOUR PROFILE / ACCOUNT OPTIONAL'}</p>
-          {screen === 'auth' && !passwordRecovery && (
+          <p className="eyebrow"><span className="red-mark">✳</span> {screen === 'settings' ? 'SETTINGS / ACCOUNT & PREFERENCES' : user ? 'YOUR PROFILE' : 'SIGN IN / CREATE ACCOUNT'}</p>
+          {screen === 'auth' && !passwordRecovery && user && (
             <>
             <section className="profile-identity" style={profile.banner ? {
               backgroundImage: `linear-gradient(90deg, rgba(23,23,21,.78), rgba(23,23,21,.38)), url("${profileImageUrl(profile.banner)}")`,
@@ -786,7 +786,7 @@ function App() {
             </section>
             </>
           )}
-          {screen === 'auth' && !passwordRecovery && (
+          {screen === 'auth' && !passwordRecovery && user && (
             <div className="profile-settings-entry">
               <p className="account-description">Account details, diary import, and profile controls live in settings.</p>
               <button className="button button-dark" onClick={() => setScreen('settings')}>OPEN SETTINGS <span aria-hidden="true">↗</span></button>
@@ -806,7 +806,7 @@ function App() {
               searchError={favoriteSearchError}
             />
           )}
-          {(screen === 'settings' || passwordRecovery) && (passwordRecovery ? (
+          {(screen === 'settings' || passwordRecovery || (screen === 'auth' && !user)) && (passwordRecovery ? (
             <>
               <div className="secondary-heading"><h1>Settings,<br /><em>password.</em></h1><span>SECURE RESET</span></div>
               <div className="account-panel">
@@ -821,7 +821,7 @@ function App() {
                 </form>
               </div>
             </>
-          ) : user ? (
+          ) : screen === 'settings' && user ? (
             <>
               <div className="secondary-heading settings-page-heading"><h1>Settings,<br /><em>in order.</em></h1><span>ACCOUNT CONTROL</span></div>
               <div className="account-panel">
@@ -851,7 +851,7 @@ function App() {
             </>
           ) : (
             <>
-              <div className="secondary-heading settings-page-heading"><h1>{authMode === 'reset-password' ? <>Reset your<br /><em>password.</em></> : <>Keep your<br /><em>films close.</em></>}</h1><span>GUEST MODE ALWAYS AVAILABLE</span></div>
+              <div className="secondary-heading settings-page-heading"><h1>{authMode === 'reset-password' ? <>Reset your<br /><em>password.</em></> : <>Sign in or<br /><em>join us.</em></>}</h1><span>GUEST MODE ALWAYS AVAILABLE</span></div>
               <div className="account-panel">
                 <p className="account-description">
                   {authMode === 'reset-password'
@@ -877,6 +877,17 @@ function App() {
                 </form>
                 {authMode === 'sign-in' && <button className="text-button forgot-password" onClick={() => { setAuthMode('reset-password'); setAuthMessage(''); clearSessionError() }}>FORGOT PASSWORD?</button>}
                 {authMode === 'reset-password' && <button className="text-button forgot-password" onClick={() => { setAuthMode('sign-in'); setAuthMessage(''); clearSessionError() }}>← BACK TO SIGN IN</button>}
+                {authMode !== 'reset-password' && (
+                  <button className="button button-light continue-as-guest" type="button" onClick={() => {
+                    setAuthEmail('')
+                    setAuthPassword('')
+                    setAuthMessage('')
+                    clearSessionError()
+                    returnHome()
+                  }}>
+                    CONTINUE AS GUEST
+                  </button>
+                )}
               </div>
             </>
           ))}
@@ -910,7 +921,7 @@ function App() {
           )}
           {screen === 'settings'
             ? <button className="back-link" onClick={() => setScreen('auth')}>← BACK TO PROFILE</button>
-            : !passwordRecovery && <button className="back-link" onClick={returnHome}>← CONTINUE AS {user ? 'SIGNED-IN USER' : 'GUEST'}</button>}
+            : user && !passwordRecovery && <button className="back-link" onClick={returnHome}>← BACK TO HOME</button>}
         </section>
       )}
       {pendingWatchedMovie && (

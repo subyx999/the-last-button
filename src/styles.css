@@ -169,6 +169,7 @@ h1, h2, p { margin-top: 0; }
 .auth-message { color: #476d44; font: 11px/1.5 var(--mono); margin: 8px 0 0; }
 .account-panel .inline-error { max-width: 520px; margin: 18px 0; }
 .forgot-password { margin-top: 20px; color: var(--red); }
+.continue-as-guest { display: block; margin-top: 22px; }
 .danger-zone { border-top: 1px solid rgba(196,65,45,.3); margin-top: 32px; padding-top: 20px; }
 .danger-zone > p { margin: 10px 0 15px; }
 .delete-confirm-actions { display: flex; align-items: center; gap: 18px; }
