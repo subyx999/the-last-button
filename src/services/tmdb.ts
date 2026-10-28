@@ -8,6 +8,22 @@ const RESPONSE_CACHE_LIMIT = 80
 const responseCache = new Map<string, { value: unknown; expiresAt: number }>()
 const pendingRequests = new Map<string, Promise<unknown>>()
 
+export interface MovieGenre {
+  id: number
+  name: string
+}
+
+function currentDateString(date = new Date()) {
+  return date.toISOString().slice(0, 10)
+}
+
+export function isReleasedMovie(movie: Pick<Movie, 'release_date'>, today = currentDateString()) {
+  const releaseDate = movie.release_date
+  if (!releaseDate || !/^\d{4}-\d{2}-\d{2}$/.test(releaseDate)) return false
+  const parsedDate = new Date(`${releaseDate}T00:00:00.000Z`)
+  return Number.isFinite(parsedDate.getTime()) && parsedDate.toISOString().slice(0, 10) === releaseDate && releaseDate <= today
+}
+
 function normalizeMovieTitle(title: string) {
   return title
     .normalize('NFKD')
@@ -89,37 +105,71 @@ export async function searchMovies(query: string): Promise<Movie[]> {
   return (result.results ?? []).filter((movie) => Boolean(movie.id && movie.title)).slice(0, 8)
 }
 
+export async function getMovieGenres(): Promise<MovieGenre[]> {
+  const result = await request<{ genres?: MovieGenre[] }>('/genre/movie/list')
+  return (result.genres ?? []).filter((genre) => genre.id && genre.name)
+}
+
+export async function discoverMoviesByGenre(genreIds: readonly number[]): Promise<Movie[]> {
+  if (!genreIds.length) return []
+
+  const params = new URLSearchParams({
+    include_adult: 'false',
+    sort_by: 'popularity.desc',
+    page: '1',
+    with_genres: genreIds.join('|'),
+    'primary_release_date.lte': currentDateString(),
+  })
+  const result = await request<{ results?: Movie[] }>(`/discover/movie?${params.toString()}`)
+  return (result.results ?? [])
+    .filter((movie) => movie.id && movie.title && isReleasedMovie(movie))
+    .slice(0, 8)
+}
+
 export async function getMovieOfTheDay(date = new Date()): Promise<Movie> {
   const day = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) / 86_400_000
   const id = DAILY_MOVIE_IDS[((day % DAILY_MOVIE_IDS.length) + DAILY_MOVIE_IDS.length) % DAILY_MOVIE_IDS.length]
-  return getMovie(id)
+  const movie = await getMovie(id)
+  if (!isReleasedMovie(movie, currentDateString(date))) {
+    throw new Error('Today’s movie does not have a valid past release date. Please try again later.')
+  }
+  return movie
 }
 
 export async function getRandomMovie(excludedIds: ReadonlySet<number> = new Set()): Promise<Movie> {
   const attemptedPages = new Set<number>()
-  const sortModes = [
-    'popularity.desc',
-    'vote_average.desc&vote_count.gte=100',
-    'primary_release_date.desc',
-    'revenue.desc',
+  const sortModes: Array<{ sortBy: string; minimumVotes?: string }> = [
+    { sortBy: 'popularity.desc' },
+    { sortBy: 'vote_average.desc', minimumVotes: '100' },
+    { sortBy: 'primary_release_date.desc' },
+    { sortBy: 'revenue.desc' },
   ]
   const sortMode = sortModes[Math.floor(Math.random() * sortModes.length)]
+  const today = currentDateString()
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     let page = Math.floor(Math.random() * 500) + 1
     while (attemptedPages.has(page)) page = (page % 500) + 1
     attemptedPages.add(page)
 
+    const params = new URLSearchParams({
+      include_adult: 'false',
+      page: String(page),
+      'primary_release_date.lte': today,
+      sort_by: sortMode.sortBy,
+    })
+    if (sortMode.minimumVotes) params.set('vote_count.gte', sortMode.minimumVotes)
     const result = await request<{ results?: Movie[] }>(
-      `/discover/movie?include_adult=false&sort_by=${sortMode}&page=${page}`,
+      `/discover/movie?${params.toString()}`,
     )
     const validMovies = (result.results ?? []).filter(
-      (movie) => movie.id && movie.title && !excludedIds.has(movie.id),
+      (movie) => movie.id && movie.title && isReleasedMovie(movie, today) && !excludedIds.has(movie.id),
     )
 
     if (!validMovies.length) continue
     const movie = validMovies[Math.floor(Math.random() * validMovies.length)]
-    return getMovie(movie.id)
+    const details = await getMovie(movie.id)
+    if (isReleasedMovie(details, today)) return details
   }
 
   throw new Error('No new movies found in the random picks. Please try again.')

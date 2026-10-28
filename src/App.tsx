@@ -1,5 +1,16 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { findExactMovie, getMovie, getMovieOfTheDay, getRandomMovie, imageUrl, searchMovies } from './services/tmdb'
+import {
+  discoverMoviesByGenre,
+  findExactMovie,
+  getMovie,
+  getMovieGenres,
+  getMovieOfTheDay,
+  getRandomMovie,
+  imageUrl,
+  isReleasedMovie,
+  searchMovies,
+  type MovieGenre,
+} from './services/tmdb'
 import { parseLetterboxdDiary } from './services/letterboxd'
 import { useWatchlist } from './hooks/useWatchlist'
 import { useWatched } from './hooks/useWatched'
@@ -10,7 +21,8 @@ import ProfileEditor from './components/ProfileEditor'
 import { supabase, SUPABASE_SETUP_MESSAGE } from './services/supabase'
 import type { Movie } from './types'
 
-type Screen = 'home' | 'watchlist' | 'watched' | 'detail' | 'auth' | 'settings'
+type Screen = 'home' | 'discover' | 'watchlist' | 'watched' | 'detail' | 'auth' | 'settings'
+type DiscoverMode = 'search' | 'genres'
 type AuthMode = 'sign-in' | 'sign-up' | 'reset-password' | 'update-password'
 type RetryTarget = 'daily' | 'random' | { detail: Movie } | null
 
@@ -107,9 +119,25 @@ function App() {
   const [favoriteResults, setFavoriteResults] = useState<Movie[]>([])
   const [favoriteSearchBusy, setFavoriteSearchBusy] = useState(false)
   const [favoriteSearchError, setFavoriteSearchError] = useState('')
+  const [discoverMode, setDiscoverMode] = useState<DiscoverMode>('search')
+  const [movieSearch, setMovieSearch] = useState('')
+  const [searchResults, setSearchResults] = useState<Movie[]>([])
+  const [searchBusy, setSearchBusy] = useState(false)
+  const [searchError, setSearchError] = useState('')
+  const [searchRetry, setSearchRetry] = useState(0)
+  const [genres, setGenres] = useState<MovieGenre[]>([])
+  const [genresLoading, setGenresLoading] = useState(false)
+  const [genresError, setGenresError] = useState('')
+  const [genresRetry, setGenresRetry] = useState(0)
+  const [selectedGenreIds, setSelectedGenreIds] = useState<number[]>([])
+  const [genreResults, setGenreResults] = useState<Movie[]>([])
+  const [genreResultsBusy, setGenreResultsBusy] = useState(false)
+  const [genreResultsError, setGenreResultsError] = useState('')
+  const [genreResultsRetry, setGenreResultsRetry] = useState(0)
   const [utcDate, setUtcDate] = useState(() => utcDateKey())
   const randomMovieIds = useRef(new Set<number>())
   const retryTarget = useRef<RetryTarget>(null)
+  const detailReturnScreen = useRef<Screen>('home')
   const { user, loading: authLoading, error: sessionError, passwordRecovery, clearPasswordRecovery, clearError: clearSessionError, setError: setSessionError } = useAuth()
   const { profile, loading: profileLoading, error: profileError, saveProfile, updateImage } = useProfile(user?.id)
   const { movies: watchlist, contains, toggle, loading: watchlistLoading, error: watchlistError, retry: retryWatchlist } = useWatchlist(user?.id)
@@ -173,6 +201,74 @@ function App() {
   }, [favoriteSearch])
 
   useEffect(() => {
+    if (screen !== 'discover' || discoverMode !== 'search') return
+    const query = movieSearch.trim()
+    if (query.length < 2) {
+      setSearchResults([])
+      setSearchBusy(false)
+      setSearchError('')
+      return
+    }
+
+    let active = true
+    setSearchResults([])
+    setSearchError('')
+    const timer = window.setTimeout(() => {
+      setSearchBusy(true)
+      searchMovies(query).then((movies) => {
+        if (active) setSearchResults(movies)
+      }).catch((cause: unknown) => {
+        if (active) setSearchError(cause instanceof Error ? cause.message : 'Could not search TMDB.')
+      }).finally(() => {
+        if (active) setSearchBusy(false)
+      })
+    }, 280)
+
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [discoverMode, movieSearch, screen, searchRetry])
+
+  useEffect(() => {
+    if (screen !== 'discover' || discoverMode !== 'genres' || genres.length) return
+    let active = true
+    setGenresLoading(true)
+    setGenresError('')
+    getMovieGenres().then((items) => {
+      if (active) setGenres(items)
+    }).catch((cause: unknown) => {
+      if (active) setGenresError(cause instanceof Error ? cause.message : 'Could not load TMDB genres.')
+    }).finally(() => {
+      if (active) setGenresLoading(false)
+    })
+    return () => { active = false }
+  }, [discoverMode, genres.length, genresRetry, screen])
+
+  useEffect(() => {
+    if (screen !== 'discover' || discoverMode !== 'genres') return
+    if (!selectedGenreIds.length) {
+      setGenreResults([])
+      setGenreResultsBusy(false)
+      setGenreResultsError('')
+      return
+    }
+
+    let active = true
+    setGenreResults([])
+    setGenreResultsBusy(true)
+    setGenreResultsError('')
+    discoverMoviesByGenre(selectedGenreIds).then((movies) => {
+      if (active) setGenreResults(movies)
+    }).catch((cause: unknown) => {
+      if (active) setGenreResultsError(cause instanceof Error ? cause.message : 'Could not discover movies.')
+    }).finally(() => {
+      if (active) setGenreResultsBusy(false)
+    })
+    return () => { active = false }
+  }, [discoverMode, genreResultsRetry, screen, selectedGenreIds])
+
+  useEffect(() => {
     const checkForUtcDateChange = () => {
       const currentUtcDate = utcDateKey()
       if (currentUtcDate !== utcDate) setUtcDate(currentUtcDate)
@@ -230,6 +326,7 @@ function App() {
       if (selected) excludedIds.add(selected.id)
       const movie = await getRandomMovie(excludedIds)
       randomMovieIds.current.add(movie.id)
+      if (screen !== 'detail') detailReturnScreen.current = screen
       setSelected(movie)
       setScreen('detail')
       retryTarget.current = null
@@ -320,6 +417,7 @@ function App() {
   }
 
   async function openMovie(movie: Movie) {
+    if (screen !== 'detail') detailReturnScreen.current = screen
     setSelected(movie)
     setScreen('detail')
     setError('')
@@ -446,6 +544,24 @@ function App() {
     setError('')
   }
 
+  function returnFromDetail() {
+    setScreen(detailReturnScreen.current)
+    setSelected(null)
+    setError('')
+  }
+
+  function openDiscovery(mode: DiscoverMode) {
+    setDiscoverMode(mode)
+    setScreen('discover')
+    setError('')
+  }
+
+  function toggleGenre(genreId: number) {
+    setSelectedGenreIds((current) => current.includes(genreId)
+      ? current.filter((id) => id !== genreId)
+      : [...current, genreId])
+  }
+
   const currentMovie = screen === 'detail' ? selected : featured
   const trailer = currentMovie?.videos?.results?.find(
     (video) => video.site === 'YouTube' && video.type === 'Trailer',
@@ -461,6 +577,9 @@ function App() {
         </button>
         <div className="topbar-status">TASTE PROFILE: NOT CONSULTED</div>
         <div className="topbar-actions">
+          <button className={`watchlist-link ${screen === 'discover' ? 'is-current' : ''}`} onClick={() => openDiscovery('search')}>
+            DISCOVER
+          </button>
           <button className={`watchlist-link ${screen === 'watchlist' ? 'is-current' : ''}`} onClick={() => setScreen('watchlist')}>
             WATCHLIST <span className="watchlist-count">{watchlist.length.toString().padStart(2, '0')}</span>
           </button>
@@ -508,7 +627,7 @@ function App() {
                 <button className="button button-dark" onClick={() => featured && openMovie(featured)} disabled={!featured || loading}>
                   {loading ? 'TUNING IN…' : 'VIEW TODAY’S PICK'} <span aria-hidden="true">↗</span>
                 </button>
-                <button className="button button-dark" onClick={() => featured && requestWatched(featured)} disabled={busy || loading || !featured || watchedLoading || streakLoading}>
+                <button className="button button-secondary" onClick={() => featured && requestWatched(featured)} disabled={busy || loading || !featured || watchedLoading || streakLoading}>
                   {busy ? 'PICKING…' : featured && hasWatched(featured.id) ? 'LOG REWATCH' : 'WATCHED'} <span aria-hidden="true">↗</span>
                 </button>
               </div>
@@ -536,6 +655,98 @@ function App() {
 
           <footer className="site-footer"><span>THE LAST BUTTON © 2026</span><span>YOUR NEXT TWO HOURS HAVE BEEN CLAIMED.</span><span>DATA: TMDB ↗</span></footer>
         </>
+      )}
+
+      {screen === 'discover' && (
+        <section className="secondary-screen discovery-screen" aria-labelledby="discovery-title">
+          <p className="eyebrow"><span className="red-mark">✳</span> THE FILM INDEX / SEARCH & DISCOVERY</p>
+          <div className="discovery-heading">
+            <div>
+              <h1 id="discovery-title">Find a<br /><em>film.</em></h1>
+              <p>Search the archive or pick a few genres. Recommendations include released films only.</p>
+            </div>
+            <button className="back-link" onClick={returnHome}>← BACK TO TODAY</button>
+          </div>
+          <div className="discovery-panel">
+            <div className="discovery-tabs" role="group" aria-label="Discovery method">
+              <button className={discoverMode === 'search' ? 'is-selected' : ''} onClick={() => setDiscoverMode('search')} aria-pressed={discoverMode === 'search'}>TITLE SEARCH</button>
+              <button className={discoverMode === 'genres' ? 'is-selected' : ''} onClick={() => setDiscoverMode('genres')} aria-pressed={discoverMode === 'genres'}>BY GENRE</button>
+            </div>
+            {discoverMode === 'search' ? (
+              <>
+                <label className="discovery-label" htmlFor="movie-search">MOVIE TITLE</label>
+                <input
+                  id="movie-search"
+                  className="discovery-search"
+                  type="search"
+                  placeholder="Search movies…"
+                  value={movieSearch}
+                  onChange={(event) => setMovieSearch(event.target.value)}
+                />
+                {searchError && <ErrorNotice message={searchError} onRetry={() => setSearchRetry((count) => count + 1)} disabled={searchBusy} />}
+                {searchBusy ? <p className="discovery-status" role="status">SEARCHING TMDB…</p> : searchResults.length ? (
+                  <div className="discovery-results" aria-label="Movie search results">
+                    {searchResults.map((movie) => {
+                      const released = isReleasedMovie(movie)
+                      const releaseLabel = released ? yearOf(movie) : movie.release_date ? 'UPCOMING' : 'RELEASE DATE UNKNOWN'
+                      return (
+                        <button className="discovery-card" key={movie.id} onClick={() => { void openMovie(movie) }} aria-label={`Open ${movie.title}, ${released ? yearOf(movie) : releaseLabel}`}>
+                          {movie.poster_path
+                            ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
+                            : <span className="discovery-poster-placeholder">NO<br />POSTER</span>}
+                          <span className="discovery-card-title">{movie.title}</span>
+                          <span className={`discovery-card-meta${released ? '' : ' is-upcoming'}`}>{releaseLabel}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                ) : searchError ? null : movieSearch.trim().length >= 2 ? (
+                  <p className="discovery-status" role="status">NO MATCHES IN THE ARCHIVE.</p>
+                ) : (
+                  <p className="discovery-status">ENTER AT LEAST TWO CHARACTERS TO SEARCH.</p>
+                )}
+              </>
+            ) : (
+              <>
+                <p className="discovery-label">CHOOSE ONE OR MORE GENRES <span>— MATCH ANY SELECTED GENRE</span></p>
+                {genresLoading ? <p className="discovery-status" role="status">LOADING GENRES…</p> : genresError ? (
+                  <ErrorNotice message={genresError} onRetry={() => setGenresRetry((count) => count + 1)} disabled={genresLoading} />
+                ) : (
+                  <div className="genre-filter-list" aria-label="Movie genres">
+                    {genres.map((genre) => (
+                      <button
+                        key={genre.id}
+                        className={`genre-filter${selectedGenreIds.includes(genre.id) ? ' is-selected' : ''}`}
+                        onClick={() => toggleGenre(genre.id)}
+                        aria-pressed={selectedGenreIds.includes(genre.id)}
+                      >
+                        {genre.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {genreResultsError && <ErrorNotice message={genreResultsError} onRetry={() => setGenreResultsRetry((count) => count + 1)} disabled={genreResultsBusy} />}
+                {genreResultsBusy ? <p className="discovery-status" role="status">FINDING RELEASED FILMS…</p> : genreResults.length ? (
+                  <div className="discovery-results" aria-label="Genre discovery results">
+                    {genreResults.map((movie) => (
+                      <button className="discovery-card" key={movie.id} onClick={() => { void openMovie(movie) }} aria-label={`Open ${movie.title}, ${yearOf(movie)}`}>
+                        {movie.poster_path
+                          ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
+                          : <span className="discovery-poster-placeholder">NO<br />POSTER</span>}
+                        <span className="discovery-card-title">{movie.title}</span>
+                        <span className="discovery-card-meta">{yearOf(movie)}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : genreResultsError ? null : selectedGenreIds.length ? (
+                  <p className="discovery-status" role="status">NO RELEASED FILMS FOUND FOR THESE GENRES.</p>
+                ) : (
+                  <p className="discovery-status">SELECT A GENRE TO FIND RELEASED FILMS.</p>
+                )}
+              </>
+            )}
+          </div>
+        </section>
       )}
 
       {screen === 'watchlist' && (
@@ -606,7 +817,7 @@ function App() {
 
       {screen === 'detail' && currentMovie && (
         <section className="detail-screen">
-          <button className="back-link" onClick={returnHome}>← BACK TO THE DAILY PICK</button>
+          <button className="back-link" onClick={returnFromDetail}>← BACK</button>
           <div className="detail-hero" style={currentMovie.backdrop_path ? { backgroundImage: `linear-gradient(90deg, #171715 0%, rgba(23,23,21,.86) 45%, rgba(23,23,21,.24) 100%), url("${imageUrl(currentMovie.backdrop_path, 'original')}")` } : undefined}>
             <div className="detail-copy">
               <p className="eyebrow">FILM FILE / {String(currentMovie.id).padStart(6, '0')}</p>
