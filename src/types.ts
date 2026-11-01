@@ -9,6 +9,8 @@ export interface Movie {
   user_rating?: number | null
   user_review?: string
   user_liked?: boolean
+  watched_at?: string
+  viewings?: MovieViewing[]
   runtime?: number | null
   genres?: Array<{ id: number; name: string }>
   tagline?: string
@@ -29,4 +31,46 @@ export interface Movie {
       official: boolean
     }>
   }
+}
+
+export interface MovieViewing {
+  id: string
+  watched_at?: string
+  user_rating?: number | null
+  user_review?: string
+  user_liked?: boolean
+  is_rewatch: boolean
+}
+
+export interface MovieCollection {
+  id: string
+  name: string
+  movies: Movie[]
+}
+
+export type ThemePreference = 'light' | 'dark' | 'system'
+
+export type ReleasePeriod =
+  | 'any'
+  | 'before-1960'
+  | '1960s'
+  | '1970s'
+  | '1980s'
+  | '1990s'
+  | '2000s'
+  | '2010s'
+  | '2020s'
+
+export interface TasteProfile {
+  preferredGenreIds: number[]
+  dislikedGenreIds: number[]
+  releasePeriod: ReleasePeriod
+  preferredLanguages: string[]
+}
+
+export const EMPTY_TASTE_PROFILE: TasteProfile = {
+  preferredGenreIds: [],
+  dislikedGenreIds: [],
+  releasePeriod: 'any',
+  preferredLanguages: [],
 }

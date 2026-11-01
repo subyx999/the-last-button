@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Movie } from '../types'
 import { supabase } from '../services/supabase'
+import { getMovieViewings, mergeMovieViewings, withMovieViewings } from '../services/watchHistory'
 
 const STORAGE_KEY = 'the-last-button-watched'
 
 function readWatched(): Movie[] {
   try {
     const value: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]')
-    return Array.isArray(value) ? value.filter((movie): movie is Movie => Boolean(movie?.id && movie?.title)) : []
+    return Array.isArray(value)
+      ? value.filter((movie): movie is Movie => Boolean(movie?.id && movie?.title)).map(withMovieViewings)
+      : []
   } catch {
     return []
   }
@@ -15,6 +18,10 @@ function readWatched(): Movie[] {
 
 function isMovie(value: unknown): value is Movie {
   return Boolean(value && typeof value === 'object' && 'id' in value && 'title' in value)
+}
+
+function isValidRating(rating: number | null) {
+  return rating === null || (rating >= 0.5 && rating <= 5 && rating * 2 % 1 === 0)
 }
 
 export function useWatched(userId: string | undefined) {
@@ -48,21 +55,33 @@ export function useWatched(userId: string | undefined) {
     async function loadAccountWatched() {
       const { data, error: queryError } = await supabase!
         .from('watched_movies')
-        .select('movie_data')
+        .select('movie_data, created_at')
         .order('created_at', { ascending: false })
 
       if (queryError) throw queryError
 
-      const accountMovies = (data ?? []).map((row) => row.movie_data).filter(isMovie)
+      const accountMovies = (data ?? []).flatMap((row) => {
+        if (!isMovie(row.movie_data)) return []
+        const watchedAt = typeof row.movie_data.watched_at === 'string' ? row.movie_data.watched_at : row.created_at
+        return [withMovieViewings({ ...row.movie_data, watched_at: watchedAt })]
+      })
       const guestMovies = readWatched()
+      const guestById = new Map(guestMovies.map((movie) => [movie.id, movie]))
+      const mergedAccount = accountMovies.map((movie) => {
+        const guestMovie = guestById.get(movie.id)
+        return guestMovie ? mergeMovieViewings(movie, guestMovie) : movie
+      })
       const accountIds = new Set(accountMovies.map((movie) => movie.id))
       const guestOnly = guestMovies.filter((movie) => !accountIds.has(movie.id))
 
-      if (guestOnly.length) {
+      if (guestOnly.length || mergedAccount.some((movie) => guestById.has(movie.id))) {
         const { error: migrationError } = await supabase!
           .from('watched_movies')
           .upsert(
-            guestOnly.map((movie) => ({ user_id: userId, movie_id: movie.id, movie_data: movie })),
+            [
+              ...guestOnly,
+              ...mergedAccount.filter((movie) => guestById.has(movie.id)),
+            ].map((movie) => ({ user_id: userId, movie_id: movie.id, movie_data: movie })),
             { onConflict: 'user_id,movie_id' },
           )
         if (migrationError) throw migrationError
@@ -70,7 +89,7 @@ export function useWatched(userId: string | undefined) {
 
       if (!active) return
       if (guestMovies.length) localStorage.removeItem(STORAGE_KEY)
-      setMovies([...guestOnly, ...accountMovies])
+      setMovies([...guestOnly, ...mergedAccount])
     }
 
     loadAccountWatched().catch((cause: unknown) => {
@@ -89,7 +108,9 @@ export function useWatched(userId: string | undefined) {
     if (contains(movie.id)) return true
 
     const previousMovies = movies
-    const nextMovies = [movie, ...movies]
+    const watchedAt = movie.watched_at ?? new Date().toISOString()
+    const nextMovies = [withMovieViewings({ ...movie, watched_at: watchedAt }), ...movies]
+    moviesRef.current = nextMovies
     setMovies(nextMovies)
 
     if (!userId) {
@@ -97,6 +118,7 @@ export function useWatched(userId: string | undefined) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(nextMovies))
         return true
       } catch (cause) {
+        moviesRef.current = previousMovies
         setMovies(previousMovies)
         setError(cause instanceof Error ? cause.message : 'Could not save your watched films.')
         return false
@@ -104,6 +126,7 @@ export function useWatched(userId: string | undefined) {
     }
 
     if (!supabase) {
+      moviesRef.current = previousMovies
       setMovies(previousMovies)
       setError('Account watched lists are unavailable because Supabase is not configured.')
       return false
@@ -113,14 +136,87 @@ export function useWatched(userId: string | undefined) {
       const { error: saveError } = await supabase
         .from('watched_movies')
         .upsert(
-          { user_id: userId, movie_id: movie.id, movie_data: movie },
+          { user_id: userId, movie_id: movie.id, movie_data: nextMovies[0] },
           { onConflict: 'user_id,movie_id' },
         )
       if (saveError) throw saveError
       return true
     } catch (cause) {
+      moviesRef.current = previousMovies
       setMovies(previousMovies)
       setError(cause instanceof Error ? cause.message : 'Could not sync your watched films.')
+      return false
+    }
+  }
+
+  const logRewatch = async (movie: Movie, rating: number | null, review: string, liked: boolean): Promise<boolean> => {
+    setError('')
+    if (!isValidRating(rating)) {
+      setError('Ratings must be between 0.5 and 5 stars in half-star steps.')
+      return false
+    }
+    const previousMovies = moviesRef.current
+    const existing = previousMovies.find((saved) => saved.id === movie.id)
+    if (!existing) {
+      setError('Could not find this film in your watched list.')
+      return false
+    }
+
+    const watchedAt = new Date().toISOString()
+    const viewings = getMovieViewings(existing)
+    const viewing = {
+      id: crypto.randomUUID(),
+      watched_at: watchedAt,
+      user_rating: rating,
+      user_review: review,
+      user_liked: liked,
+      is_rewatch: true,
+    }
+    const updatedMovie: Movie = {
+      ...movie,
+      ...existing,
+      watched_at: watchedAt,
+      user_rating: rating,
+      user_review: review,
+      user_liked: liked,
+      viewings: [...viewings, viewing],
+    }
+    const nextMovies = [updatedMovie, ...previousMovies.filter((saved) => saved.id !== movie.id)]
+    moviesRef.current = nextMovies
+    setMovies(nextMovies)
+
+    if (!userId) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextMovies))
+        return true
+      } catch (cause) {
+        moviesRef.current = previousMovies
+        setMovies(previousMovies)
+        setError(cause instanceof Error ? cause.message : 'Could not save this rewatch.')
+        return false
+      }
+    }
+
+    if (!supabase) {
+      moviesRef.current = previousMovies
+      setMovies(previousMovies)
+      setError('Account watched lists are unavailable because Supabase is not configured.')
+      return false
+    }
+
+    try {
+      const { error: saveError } = await supabase
+        .from('watched_movies')
+        .upsert(
+          { user_id: userId, movie_id: movie.id, movie_data: updatedMovie },
+          { onConflict: 'user_id,movie_id' },
+        )
+      if (saveError) throw saveError
+      return true
+    } catch (cause) {
+      moviesRef.current = previousMovies
+      setMovies(previousMovies)
+      setError(cause instanceof Error ? cause.message : 'Could not sync this rewatch.')
       return false
     }
   }
@@ -129,7 +225,9 @@ export function useWatched(userId: string | undefined) {
     setError('')
     const uniqueMovies = [...new Map(newMovies.map((movie) => [movie.id, movie])).values()]
     const previousMovies = moviesRef.current
-    const additions = uniqueMovies.filter((movie) => !previousMovies.some((saved) => saved.id === movie.id))
+    const additions = uniqueMovies
+      .filter((movie) => !previousMovies.some((saved) => saved.id === movie.id))
+      .map(withMovieViewings)
     if (!additions.length) return true
 
     const nextMovies = [...additions, ...previousMovies]
@@ -172,9 +270,9 @@ export function useWatched(userId: string | undefined) {
     }
   }
 
-  const setRating = async (movieId: number, rating: number | null, review?: string, liked?: boolean): Promise<boolean> => {
+  const setRating = async (movieId: number, rating: number | null, review?: string, liked?: boolean, viewingId?: string): Promise<boolean> => {
     setError('')
-    if (rating !== null && (rating < 0.5 || rating > 5 || rating * 2 % 1 !== 0)) {
+    if (!isValidRating(rating)) {
       setError('Ratings must be between 0.5 and 5 stars in half-star steps.')
       return false
     }
@@ -186,11 +284,29 @@ export function useWatched(userId: string | undefined) {
       return false
     }
 
-    const updatedMovie: Movie = {
-      ...movie,
+    const viewings = getMovieViewings(movie)
+    const targetIndex = viewingId
+      ? viewings.findIndex((viewing) => viewing.id === viewingId)
+      : viewings.length - 1
+    if (targetIndex < 0) {
+      setError('Could not find this viewing in your history.')
+      return false
+    }
+    const updatedViewings = viewings.map((viewing, index) => index === targetIndex ? {
+      ...viewing,
       user_rating: rating,
       ...(review === undefined ? {} : { user_review: review }),
       ...(liked === undefined ? {} : { user_liked: liked }),
+    } : viewing)
+    const isLatestViewing = targetIndex === viewings.length - 1
+    const updatedMovie: Movie = {
+      ...movie,
+      viewings: updatedViewings,
+      ...(isLatestViewing ? {
+        user_rating: rating,
+        ...(review === undefined ? {} : { user_review: review }),
+        ...(liked === undefined ? {} : { user_liked: liked }),
+      } : {}),
     }
     const nextMovies = previousMovies.map((saved) => saved.id === movieId ? updatedMovie : saved)
     moviesRef.current = nextMovies
@@ -266,5 +382,5 @@ export function useWatched(userId: string | undefined) {
     }
   }
 
-  return { movies, contains, loading, error, markWatched, addMany, setRating, removeWatched, retry: () => setReloadKey((key) => key + 1) }
+  return { movies, contains, loading, error, markWatched, logRewatch, addMany, setRating, removeWatched, retry: () => setReloadKey((key) => key + 1) }
 }

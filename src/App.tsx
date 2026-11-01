@@ -16,15 +16,40 @@ import { useWatchlist } from './hooks/useWatchlist'
 import { useWatched } from './hooks/useWatched'
 import { useDailyStreak } from './hooks/useDailyStreak'
 import { useAuth } from './hooks/useAuth'
-import { profileImageUrl, useProfile } from './hooks/useProfile'
+import { isTasteProfileConfigured, profileImageUrl, useProfile } from './hooks/useProfile'
 import ProfileEditor from './components/ProfileEditor'
+import TasteProfileEditor from './components/TasteProfileEditor'
+import UsernameEditor from './components/UsernameEditor'
+import CinemaArchive from './components/CinemaArchive'
+import ArchiveFilmView from './components/ArchiveFilmView'
+import type { ArchiveSection } from './components/CinemaArchive'
+import { getMovieViewings } from './services/watchHistory'
 import { supabase, SUPABASE_SETUP_MESSAGE } from './services/supabase'
-import type { Movie } from './types'
+import { EMPTY_TASTE_PROFILE, type Movie, type ThemePreference } from './types'
 
-type Screen = 'home' | 'discover' | 'watchlist' | 'watched' | 'detail' | 'auth' | 'settings'
+type Screen = 'home' | 'discover' | 'watchlist' | 'watched' | 'detail' | 'archive-detail' | 'auth' | 'settings'
 type DiscoverMode = 'search' | 'genres'
 type AuthMode = 'sign-in' | 'sign-up' | 'reset-password' | 'update-password'
-type RetryTarget = 'daily' | 'random' | { detail: Movie } | null
+type RetryTarget = 'daily' | 'random' | { detail: Movie; archive?: boolean } | null
+function isThemePreference(value: string | null | undefined): value is ThemePreference {
+  return value === 'light' || value === 'dark' || value === 'system'
+}
+
+function initialThemePreference(): ThemePreference {
+  const preference = document.documentElement.dataset.themePreference
+  return isThemePreference(preference) ? preference : 'light'
+}
+
+function applyTheme(preference: ThemePreference) {
+  const theme = preference === 'system'
+    ? window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    : preference
+  const root = document.documentElement
+  root.dataset.theme = theme
+  root.dataset.themePreference = preference
+  root.style.colorScheme = theme
+  document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#171715' : '#f2efe7')
+}
 
 function utcDateKey(date = new Date()) {
   return date.toISOString().slice(0, 10)
@@ -85,7 +110,7 @@ function RatingStars({ rating, onRate, label, disabled }: {
               onRate(rating === value ? null : value)
             }}
           >
-            <span style={{ backgroundImage: `linear-gradient(90deg, var(--red) ${fill}%, #bdb9ae ${fill}%)` }}>★</span>
+            <span style={{ backgroundImage: `linear-gradient(90deg, var(--red) ${fill}%, var(--star-empty) ${fill}%)` }}>★</span>
           </button>
         )
       })}
@@ -95,6 +120,7 @@ function RatingStars({ rating, onRate, label, disabled }: {
 
 function App() {
   const [screen, setScreen] = useState<Screen>('home')
+  const [themePreference, setThemePreference] = useState<ThemePreference>(initialThemePreference)
   const [featured, setFeatured] = useState<Movie | null>(null)
   const [selected, setSelected] = useState<Movie | null>(null)
   const [loading, setLoading] = useState(true)
@@ -115,6 +141,9 @@ function App() {
   const [pendingRating, setPendingRating] = useState<number | null>(null)
   const [pendingReview, setPendingReview] = useState('')
   const [pendingLiked, setPendingLiked] = useState(false)
+  const [pendingWatchedEditOnly, setPendingWatchedEditOnly] = useState(false)
+  const [pendingWatchedViewingId, setPendingWatchedViewingId] = useState<string | undefined>(undefined)
+  const [archiveSection, setArchiveSection] = useState<ArchiveSection>('overview')
   const [favoriteSearch, setFavoriteSearch] = useState('')
   const [favoriteResults, setFavoriteResults] = useState<Movie[]>([])
   const [favoriteSearchBusy, setFavoriteSearchBusy] = useState(false)
@@ -138,8 +167,10 @@ function App() {
   const randomMovieIds = useRef(new Set<number>())
   const retryTarget = useRef<RetryTarget>(null)
   const detailReturnScreen = useRef<Screen>('home')
+  const archiveDetailHistory = useRef(false)
+  const archiveViewingId = useRef<string | undefined>(undefined)
   const { user, loading: authLoading, error: sessionError, passwordRecovery, clearPasswordRecovery, clearError: clearSessionError, setError: setSessionError } = useAuth()
-  const { profile, loading: profileLoading, error: profileError, saveProfile, updateImage } = useProfile(user?.id)
+  const { profile, loading: profileLoading, error: profileError, saveCollections, saveFavorites, saveTasteProfile, saveUsername, updateImage } = useProfile(user?.id)
   const { movies: watchlist, contains, toggle, loading: watchlistLoading, error: watchlistError, retry: retryWatchlist } = useWatchlist(user?.id)
   const {
     movies: watchedMovies,
@@ -147,6 +178,7 @@ function App() {
     loading: watchedLoading,
     error: watchedError,
     markWatched,
+    logRewatch,
     addMany: addWatchedMany,
     setRating: setWatchedRating,
     removeWatched,
@@ -166,11 +198,61 @@ function App() {
   const ratedMovies = watchedMovies
     .filter((movie): movie is Movie & { user_rating: number } => movie.user_rating !== null && movie.user_rating !== undefined)
     .sort((a, b) => b.user_rating - a.user_rating)
-  const topRatedMovies = ratedMovies.slice(0, 3)
   const averageRating = ratedMovies.length
     ? (ratedMovies.reduce((total, movie) => total + movie.user_rating, 0) / ratedMovies.length).toFixed(1)
     : '—'
-  const likedMovieCount = watchedMovies.filter((movie) => movie.user_liked).length
+  const tasteProfileReady = !profileLoading && !(user && profileError)
+  const activeTasteProfile = tasteProfileReady ? profile.tasteProfile : EMPTY_TASTE_PROFILE
+  const tasteProfileConfigured = tasteProfileReady && isTasteProfileConfigured(activeTasteProfile)
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
+    const updateTheme = () => applyTheme(themePreference)
+    const handleSystemThemeChange = () => {
+      if (themePreference === 'system') updateTheme()
+    }
+    const handleStorageChange = (event: StorageEvent) => {
+      if (event.key === 'tlb-theme') setThemePreference(isThemePreference(event.newValue) ? event.newValue : 'light')
+    }
+
+    updateTheme()
+    try {
+      window.localStorage.setItem('tlb-theme', themePreference)
+    } catch (cause) {
+      console.warn('Could not save the appearance preference.', cause)
+    }
+
+    if (themePreference === 'system') mediaQuery.addEventListener('change', handleSystemThemeChange)
+    window.addEventListener('storage', handleStorageChange)
+    return () => {
+      mediaQuery.removeEventListener('change', handleSystemThemeChange)
+      window.removeEventListener('storage', handleStorageChange)
+    }
+  }, [themePreference])
+
+  useEffect(() => {
+    function handleArchiveHistory(event: PopStateEvent) {
+      const state = event.state as { tlbArchiveDetail?: boolean; tlbArchiveOriginalDetail?: boolean } | null
+      if (state?.tlbArchiveOriginalDetail && selected) {
+        archiveDetailHistory.current = true
+        setScreen('detail')
+        return
+      }
+      if (state?.tlbArchiveDetail && selected) {
+        archiveDetailHistory.current = true
+        setScreen('archive-detail')
+        return
+      }
+      if (archiveDetailHistory.current) {
+        archiveDetailHistory.current = false
+        setScreen(detailReturnScreen.current)
+        setError('')
+      }
+    }
+
+    window.addEventListener('popstate', handleArchiveHistory)
+    return () => window.removeEventListener('popstate', handleArchiveHistory)
+  }, [selected])
 
   useEffect(() => {
     const query = favoriteSearch.trim()
@@ -203,7 +285,7 @@ function App() {
   useEffect(() => {
     if (screen !== 'discover' || discoverMode !== 'search') return
     const query = movieSearch.trim()
-    if (query.length < 2) {
+    if (!query) {
       setSearchResults([])
       setSearchBusy(false)
       setSearchError('')
@@ -212,9 +294,9 @@ function App() {
 
     let active = true
     setSearchResults([])
+    setSearchBusy(true)
     setSearchError('')
     const timer = window.setTimeout(() => {
-      setSearchBusy(true)
       searchMovies(query).then((movies) => {
         if (active) setSearchResults(movies)
       }).catch((cause: unknown) => {
@@ -324,7 +406,10 @@ function App() {
       for (const movie of watchedMovies) excludedIds.add(movie.id)
       if (featured) excludedIds.add(featured.id)
       if (selected) excludedIds.add(selected.id)
-      const movie = await getRandomMovie(excludedIds)
+      const movie = await getRandomMovie(
+        excludedIds,
+        tasteProfileConfigured ? activeTasteProfile : undefined,
+      )
       randomMovieIds.current.add(movie.id)
       if (screen !== 'detail') detailReturnScreen.current = screen
       setSelected(movie)
@@ -338,11 +423,17 @@ function App() {
     }
   }
 
-  function requestWatched(movie: Movie) {
+  function requestWatched(movie: Movie, editOnly = false, viewingId?: string) {
+    const savedMovie = watchedMovies.find((saved) => saved.id === movie.id)
+    const viewing = editOnly && viewingId && savedMovie
+      ? getMovieViewings(savedMovie).find((item) => item.id === viewingId)
+      : undefined
     setPendingWatchedMovie(movie)
-    setPendingRating(movie.user_rating ?? null)
-    setPendingReview(movie.user_review ?? '')
-    setPendingLiked(movie.user_liked ?? false)
+    setPendingRating(editOnly ? viewing?.user_rating ?? movie.user_rating ?? null : hasWatched(movie.id) ? null : movie.user_rating ?? null)
+    setPendingReview(editOnly ? viewing?.user_review ?? movie.user_review ?? '' : hasWatched(movie.id) ? '' : movie.user_review ?? '')
+    setPendingLiked(editOnly ? viewing?.user_liked ?? movie.user_liked ?? false : hasWatched(movie.id) ? false : movie.user_liked ?? false)
+    setPendingWatchedEditOnly(editOnly)
+    setPendingWatchedViewingId(editOnly ? viewingId : undefined)
   }
 
   async function markWatchedAndDiscover(movie: Movie, rating: number | null, review: string, liked: boolean): Promise<boolean> {
@@ -350,7 +441,7 @@ function App() {
     setError('')
     const movieToSave = { ...movie, user_rating: rating, user_review: review.trim(), user_liked: liked }
     const saved = hasWatched(movie.id)
-      ? await setWatchedRating(movie.id, rating, review.trim(), liked)
+      ? await logRewatch(movieToSave, rating, review.trim(), liked)
       : await markWatched(movieToSave)
     if (!saved) {
       setBusy(false)
@@ -367,8 +458,27 @@ function App() {
 
     randomMovieIds.current.add(movie.id)
     setPendingWatchedMovie(null)
+    setPendingWatchedViewingId(undefined)
     await discoverRandom(new Set([movie.id]))
     return true
+  }
+
+  async function saveArchiveReview(movie: Movie, rating: number | null, review: string, liked: boolean, viewingId?: string) {
+    setBusy(true)
+    setError('')
+    const saved = await setWatchedRating(movie.id, rating, review.trim(), liked, viewingId)
+    if (saved) {
+      setSelected((current) => ({
+        ...(current?.id === movie.id ? current : movie),
+        user_rating: rating,
+        user_review: review.trim(),
+        user_liked: liked,
+      }))
+      setPendingWatchedMovie(null)
+      setPendingWatchedEditOnly(false)
+      setPendingWatchedViewingId(undefined)
+    }
+    setBusy(false)
   }
 
   async function importLetterboxdDiary(file: File) {
@@ -418,6 +528,8 @@ function App() {
 
   async function openMovie(movie: Movie) {
     if (screen !== 'detail') detailReturnScreen.current = screen
+    archiveDetailHistory.current = false
+    archiveViewingId.current = undefined
     setSelected(movie)
     setScreen('detail')
     setError('')
@@ -433,6 +545,53 @@ function App() {
     } finally {
       setBusy(false)
     }
+  }
+
+  async function openArchiveMovie(movie: Movie, viewingId?: string) {
+    const returnScreen = screen === 'watched' ? 'watched' : 'auth'
+    detailReturnScreen.current = returnScreen
+    archiveDetailHistory.current = true
+    archiveViewingId.current = viewingId
+    setSelected(movie)
+    setScreen('archive-detail')
+    setError('')
+    retryTarget.current = null
+    try {
+      window.history.pushState({ ...(window.history.state ?? {}), tlbArchiveDetail: true }, '')
+    } catch (cause) {
+      archiveDetailHistory.current = false
+      setScreen(returnScreen)
+      setError(cause instanceof Error ? `Could not open this archive entry: ${cause.message}` : 'Could not open this archive entry.')
+      return
+    }
+    if (movie.credits) return
+
+    setBusy(true)
+    try {
+      setSelected(await getMovie(movie.id))
+      retryTarget.current = null
+    } catch (cause) {
+      retryTarget.current = { detail: movie, archive: true }
+      setError(cause instanceof Error ? cause.message : 'Archive film details could not be loaded.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function openOriginalMovieFromArchive(movie: Movie) {
+    detailReturnScreen.current = 'archive-detail'
+    archiveDetailHistory.current = true
+    try {
+      window.history.pushState({ tlbArchiveOriginalDetail: true }, '')
+    } catch (cause) {
+      setError(cause instanceof Error ? `Could not open movie details: ${cause.message}` : 'Could not open movie details.')
+      return
+    }
+
+    setSelected(movie)
+    setScreen('detail')
+    setError('')
+    retryTarget.current = null
   }
 
   async function retryFailedRequest() {
@@ -453,7 +612,20 @@ function App() {
     } else if (target === 'random') {
       await discoverRandom()
     } else if (target) {
-      await openMovie(target.detail)
+      if (target.archive) {
+        setBusy(true)
+        try {
+          setSelected(await getMovie(target.detail.id))
+          retryTarget.current = null
+        } catch (cause) {
+          retryTarget.current = target
+          setError(cause instanceof Error ? cause.message : 'Archive film details could not be loaded.')
+        } finally {
+          setBusy(false)
+        }
+      } else {
+        await openMovie(target.detail)
+      }
     }
   }
 
@@ -539,12 +711,34 @@ function App() {
   }
 
   function returnHome() {
+    if (screen === 'archive-detail' && archiveDetailHistory.current) {
+      const state = window.history.state as Record<string, unknown> | null
+      if (state?.tlbArchiveDetail) {
+        const nextState = { ...state }
+        delete nextState.tlbArchiveDetail
+        window.history.replaceState(nextState, '')
+      }
+      archiveDetailHistory.current = false
+    }
     setScreen('home')
     setSelected(null)
     setError('')
   }
 
   function returnFromDetail() {
+    if (screen === 'detail' && detailReturnScreen.current === 'archive-detail') {
+      window.history.back()
+      return
+    }
+    if (screen === 'archive-detail') {
+      if (archiveDetailHistory.current) {
+        window.history.back()
+        return
+      }
+      setScreen(detailReturnScreen.current)
+      setError('')
+      return
+    }
     setScreen(detailReturnScreen.current)
     setSelected(null)
     setError('')
@@ -562,7 +756,20 @@ function App() {
       : [...current, genreId])
   }
 
-  const currentMovie = screen === 'detail' ? selected : featured
+  const currentMovie = screen === 'detail' || screen === 'archive-detail' ? selected : featured
+  const savedArchiveMovie = currentMovie ? watchedMovies.find((movie) => movie.id === currentMovie.id) : undefined
+  const selectedArchiveViewing = savedArchiveMovie
+    ? getMovieViewings(savedArchiveMovie).find((viewing) => viewing.id === archiveViewingId.current)
+    : undefined
+  const archivePersonalMovie = savedArchiveMovie && selectedArchiveViewing
+    ? {
+      ...savedArchiveMovie,
+      watched_at: selectedArchiveViewing.watched_at,
+      user_rating: selectedArchiveViewing.user_rating,
+      user_review: selectedArchiveViewing.user_review,
+      user_liked: selectedArchiveViewing.user_liked,
+    }
+    : savedArchiveMovie ?? currentMovie
   const trailer = currentMovie?.videos?.results?.find(
     (video) => video.site === 'YouTube' && video.type === 'Trailer',
   ) ?? currentMovie?.videos?.results?.find(
@@ -575,7 +782,13 @@ function App() {
         <button className="wordmark" onClick={returnHome} aria-label="The Last Button, home">
           <span className="wordmark-icon">◉</span> THE LAST BUTTON
         </button>
-        <div className="topbar-status">TASTE PROFILE: NOT CONSULTED</div>
+        <div className="topbar-status" aria-live="polite">
+          {!tasteProfileReady
+            ? profileError ? 'TASTE PROFILE: UNAVAILABLE' : 'TASTE PROFILE: LOADING'
+            : tasteProfileConfigured
+              ? 'TASTE PROFILE: SET / FILTERING RANDOM PICKS'
+              : 'TASTE PROFILE: NOT SET / RANDOM PICKS UNFILTERED'}
+        </div>
         <div className="topbar-actions">
           <button className={`watchlist-link ${screen === 'discover' ? 'is-current' : ''}`} onClick={() => openDiscovery('search')}>
             DISCOVER
@@ -586,8 +799,14 @@ function App() {
           <button className={`watchlist-link ${screen === 'watched' ? 'is-current' : ''}`} onClick={() => setScreen('watched')}>
             WATCHED <span className="watchlist-count">{watchedMovies.length.toString().padStart(2, '0')}</span>
           </button>
-          <button className={`account-link ${screen === 'auth' || screen === 'settings' ? 'is-current' : ''}`} onClick={() => { setAuthMessage(''); setScreen('auth') }}>
-            {authLoading ? 'PROFILE…' : user ? 'PROFILE' : 'SIGN IN'}
+          <button className={`watchlist-link ${screen === 'settings' ? 'is-current' : ''}`} onClick={() => setScreen('settings')}>
+            SETTINGS
+          </button>
+          <button className={`account-link ${screen === 'auth' ? 'is-current' : ''}`} onClick={() => {
+            setAuthMessage('')
+            setScreen('auth')
+          }}>
+            {authLoading ? 'PROFILE…' : 'PROFILE'}
           </button>
         </div>
       </header>
@@ -659,92 +878,144 @@ function App() {
 
       {screen === 'discover' && (
         <section className="secondary-screen discovery-screen" aria-labelledby="discovery-title">
-          <p className="eyebrow"><span className="red-mark">✳</span> THE FILM INDEX / SEARCH & DISCOVERY</p>
-          <div className="discovery-heading">
-            <div>
-              <h1 id="discovery-title">Find a<br /><em>film.</em></h1>
-              <p>Search the archive or pick a few genres. Recommendations include released films only.</p>
+          <header className="discovery-masthead">
+            <p className="eyebrow"><span className="red-mark">✳</span> INDEX 01 / THE UNSETTLED PICTURE ARCHIVE</p>
+            <div className="discovery-heading">
+              <div className="discovery-heading-main">
+                <span className="discovery-edition">A FIELD GUIDE TO WHAT COMES NEXT</span>
+                <h1 id="discovery-title"><span>Find a</span><br /><em>signal.</em></h1>
+              </div>
+              <div className="discovery-heading-note">
+                <p>Not a recommendation engine. A loose thread through cinema, filed by title or feeling.</p>
+                <button className="back-link" onClick={returnHome}>← TODAY'S TRANSMISSION</button>
+              </div>
+              <span className="discovery-masthead-mark" aria-hidden="true">01<br />/ 24</span>
             </div>
-            <button className="back-link" onClick={returnHome}>← BACK TO TODAY</button>
-          </div>
-          <div className="discovery-panel">
-            <div className="discovery-tabs" role="group" aria-label="Discovery method">
-              <button className={discoverMode === 'search' ? 'is-selected' : ''} onClick={() => setDiscoverMode('search')} aria-pressed={discoverMode === 'search'}>TITLE SEARCH</button>
-              <button className={discoverMode === 'genres' ? 'is-selected' : ''} onClick={() => setDiscoverMode('genres')} aria-pressed={discoverMode === 'genres'}>BY GENRE</button>
-            </div>
-            {discoverMode === 'search' ? (
-              <>
-                <label className="discovery-label" htmlFor="movie-search">MOVIE TITLE</label>
-                <input
-                  id="movie-search"
-                  className="discovery-search"
-                  type="search"
-                  placeholder="Search movies…"
-                  value={movieSearch}
-                  onChange={(event) => setMovieSearch(event.target.value)}
-                />
-                {searchError && <ErrorNotice message={searchError} onRetry={() => setSearchRetry((count) => count + 1)} disabled={searchBusy} />}
-                {searchBusy ? <p className="discovery-status" role="status">SEARCHING TMDB…</p> : searchResults.length ? (
-                  <div className="discovery-results" aria-label="Movie search results">
-                    {searchResults.map((movie) => {
-                      const released = isReleasedMovie(movie)
-                      const releaseLabel = released ? yearOf(movie) : movie.release_date ? 'UPCOMING' : 'RELEASE DATE UNKNOWN'
-                      return (
-                        <button className="discovery-card" key={movie.id} onClick={() => { void openMovie(movie) }} aria-label={`Open ${movie.title}, ${released ? yearOf(movie) : releaseLabel}`}>
-                          {movie.poster_path
-                            ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
-                            : <span className="discovery-poster-placeholder">NO<br />POSTER</span>}
-                          <span className="discovery-card-title">{movie.title}</span>
-                          <span className={`discovery-card-meta${released ? '' : ' is-upcoming'}`}>{releaseLabel}</span>
+          </header>
+          <div className="discovery-workbench">
+            <aside className="discovery-rail" aria-label="Archive information">
+              <span>THE LAST BUTTON</span>
+              <span>EST. IN THE MOMENT</span>
+              <span>SEARCH / FILTER / WANDER</span>
+            </aside>
+            <div className="discovery-content">
+              <div className="discovery-tabs" role="group" aria-label="Discovery method">
+                <button className={discoverMode === 'search' ? 'is-selected' : ''} onClick={() => setDiscoverMode('search')} aria-pressed={discoverMode === 'search'}>
+                  <span>01</span> TITLE SEARCH
+                </button>
+                <button className={discoverMode === 'genres' ? 'is-selected' : ''} onClick={() => setDiscoverMode('genres')} aria-pressed={discoverMode === 'genres'}>
+                  <span>02</span> GENRE MIX
+                </button>
+              </div>
+              {discoverMode === 'search' ? (
+                <>
+                  <label className="discovery-label" htmlFor="movie-search">
+                    <span>OPEN QUERY</span><span>ONE WORD IS ENOUGH</span>
+                  </label>
+                  <div className="discovery-search-row">
+                    <input
+                      id="movie-search"
+                      className="discovery-search"
+                      type="search"
+                      placeholder="Type a title…"
+                      value={movieSearch}
+                      onChange={(event) => setMovieSearch(event.target.value)}
+                    />
+                    <span className="discovery-search-mark" aria-hidden="true">↳</span>
+                  </div>
+                  {searchError && <ErrorNotice message={searchError} onRetry={() => setSearchRetry((count) => count + 1)} disabled={searchBusy} />}
+                  {searchBusy ? <p className="discovery-status" role="status"><span className="discovery-status-mark" aria-hidden="true">◌</span> ASKING THE ARCHIVE…</p> : searchResults.length ? (
+                    <>
+                      <div className="discovery-results-heading">
+                        <span>RETURN / “{movieSearch.trim()}”</span>
+                        <span>{String(searchResults.length).padStart(2, '0')} FRAGMENTS</span>
+                      </div>
+                      <div className="discovery-results" aria-label="Movie search results">
+                        {searchResults.map((movie, index) => {
+                          const released = isReleasedMovie(movie)
+                          const releaseLabel = released ? yearOf(movie) : movie.release_date ? 'UPCOMING' : 'RELEASE DATE UNKNOWN'
+                          return (
+                            <button className="discovery-card" key={movie.id} onClick={() => { void openMovie(movie) }} aria-label={`Open ${movie.title}, ${released ? yearOf(movie) : releaseLabel}`}>
+                              <span className="discovery-card-index" aria-hidden="true">{String(index + 1).padStart(3, '0')} / FILM</span>
+                              {movie.poster_path
+                                ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
+                                : <span className="discovery-poster-placeholder">NO<br />IMAGE<br />ON FILE</span>}
+                              <span className="discovery-card-title">{movie.title}</span>
+                              <span className="discovery-card-meta-row">
+                                <span className={`discovery-card-meta${released ? '' : ' is-upcoming'}`}>{releaseLabel}</span>
+                                <span className="discovery-card-rating">{movie.vote_average && movie.vote_average > 0 ? `${movie.vote_average.toFixed(1)} / 10` : 'UNRATED'}</span>
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </>
+                  ) : searchError ? null : movieSearch.trim() ? (
+                    <p className="discovery-status" role="status">NO SIGNAL FOUND FOR THAT TITLE.</p>
+                  ) : (
+                    <p className="discovery-status">BEGIN WITH A TITLE — INCLUDING A SINGLE LETTER.</p>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="genre-toolbar">
+                    <p className="discovery-label"><span>BUILD A GENRE MIX</span><span>FILMS MUST MATCH EVERY ACTIVE GENRE</span></p>
+                    <div className="genre-selection-summary" aria-live="polite">
+                      <span>{selectedGenreIds.length ? `${String(selectedGenreIds.length).padStart(2, '0')} ACTIVE` : 'NO FILTERS'}</span>
+                      <button className="genre-clear" type="button" onClick={() => setSelectedGenreIds([])} disabled={!selectedGenreIds.length}>
+                        CLEAR ALL <span aria-hidden="true">×</span>
+                      </button>
+                    </div>
+                  </div>
+                  {genresLoading ? <p className="discovery-status" role="status">OPENING THE GENRE INDEX…</p> : genresError ? (
+                    <ErrorNotice message={genresError} onRetry={() => setGenresRetry((count) => count + 1)} disabled={genresLoading} />
+                  ) : (
+                    <div className="genre-filter-list" role="group" aria-label="Movie genres" aria-describedby="genre-filter-help">
+                      <span id="genre-filter-help" className="sr-only">Select one or more genres. Results must include every selected genre.</span>
+                      {genres.map((genre, index) => (
+                        <button
+                          key={genre.id}
+                          className={`genre-filter${selectedGenreIds.includes(genre.id) ? ' is-selected' : ''}`}
+                          onClick={() => toggleGenre(genre.id)}
+                          aria-pressed={selectedGenreIds.includes(genre.id)}
+                        >
+                          <span className="genre-filter-index" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+                          {genre.name}
                         </button>
-                      )
-                    })}
-                  </div>
-                ) : searchError ? null : movieSearch.trim().length >= 2 ? (
-                  <p className="discovery-status" role="status">NO MATCHES IN THE ARCHIVE.</p>
-                ) : (
-                  <p className="discovery-status">ENTER AT LEAST TWO CHARACTERS TO SEARCH.</p>
-                )}
-              </>
-            ) : (
-              <>
-                <p className="discovery-label">CHOOSE ONE OR MORE GENRES <span>— MATCH ANY SELECTED GENRE</span></p>
-                {genresLoading ? <p className="discovery-status" role="status">LOADING GENRES…</p> : genresError ? (
-                  <ErrorNotice message={genresError} onRetry={() => setGenresRetry((count) => count + 1)} disabled={genresLoading} />
-                ) : (
-                  <div className="genre-filter-list" aria-label="Movie genres">
-                    {genres.map((genre) => (
-                      <button
-                        key={genre.id}
-                        className={`genre-filter${selectedGenreIds.includes(genre.id) ? ' is-selected' : ''}`}
-                        onClick={() => toggleGenre(genre.id)}
-                        aria-pressed={selectedGenreIds.includes(genre.id)}
-                      >
-                        {genre.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {genreResultsError && <ErrorNotice message={genreResultsError} onRetry={() => setGenreResultsRetry((count) => count + 1)} disabled={genreResultsBusy} />}
-                {genreResultsBusy ? <p className="discovery-status" role="status">FINDING RELEASED FILMS…</p> : genreResults.length ? (
-                  <div className="discovery-results" aria-label="Genre discovery results">
-                    {genreResults.map((movie) => (
-                      <button className="discovery-card" key={movie.id} onClick={() => { void openMovie(movie) }} aria-label={`Open ${movie.title}, ${yearOf(movie)}`}>
-                        {movie.poster_path
-                          ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
-                          : <span className="discovery-poster-placeholder">NO<br />POSTER</span>}
-                        <span className="discovery-card-title">{movie.title}</span>
-                        <span className="discovery-card-meta">{yearOf(movie)}</span>
-                      </button>
-                    ))}
-                  </div>
-                ) : genreResultsError ? null : selectedGenreIds.length ? (
-                  <p className="discovery-status" role="status">NO RELEASED FILMS FOUND FOR THESE GENRES.</p>
-                ) : (
-                  <p className="discovery-status">SELECT A GENRE TO FIND RELEASED FILMS.</p>
-                )}
-              </>
-            )}
+                      ))}
+                    </div>
+                  )}
+                  {genreResultsError && <ErrorNotice message={genreResultsError} onRetry={() => setGenreResultsRetry((count) => count + 1)} disabled={genreResultsBusy} />}
+                  {genreResultsBusy ? <p className="discovery-status" role="status"><span className="discovery-status-mark" aria-hidden="true">◌</span> CROSS-REFERENCING THE INDEX…</p> : genreResults.length ? (
+                    <>
+                      <div className="discovery-results-heading">
+                        <span>INTERSECTION / {selectedGenreIds.length} GENRE{selectedGenreIds.length === 1 ? '' : 'S'}</span>
+                        <span>{String(genreResults.length).padStart(2, '0')} FRAGMENTS</span>
+                      </div>
+                      <div className="discovery-results" aria-label="Genre discovery results">
+                        {genreResults.map((movie, index) => (
+                          <button className="discovery-card" key={movie.id} onClick={() => { void openMovie(movie) }} aria-label={`Open ${movie.title}, ${yearOf(movie)}`}>
+                            <span className="discovery-card-index" aria-hidden="true">{String(index + 1).padStart(3, '0')} / FILM</span>
+                            {movie.poster_path
+                              ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
+                              : <span className="discovery-poster-placeholder">NO<br />IMAGE<br />ON FILE</span>}
+                            <span className="discovery-card-title">{movie.title}</span>
+                            <span className="discovery-card-meta-row">
+                              <span className="discovery-card-meta">{yearOf(movie)}</span>
+                              <span className="discovery-card-rating">{movie.vote_average && movie.vote_average > 0 ? `${movie.vote_average.toFixed(1)} / 10` : 'UNRATED'}</span>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  ) : genreResultsError ? null : selectedGenreIds.length ? (
+                    <p className="discovery-status" role="status">NO RELEASED FILMS MATCH EVERY SELECTED GENRE.</p>
+                  ) : (
+                    <p className="discovery-status">CHOOSE A GENRE TO START THE CROSS-REFERENCE.</p>
+                  )}
+                </>
+              )}
+            </div>
           </div>
         </section>
       )}
@@ -780,7 +1051,7 @@ function App() {
             <div className="watchlist-grid">
               {watchedMovies.map((movie, index) => (
                 <article className="watch-item" key={movie.id}>
-                  <button className="watch-item-open" onClick={() => openMovie(movie)} aria-label={`Open ${movie.title}`}>
+                  <button className="watch-item-open" onClick={() => { void openArchiveMovie(movie) }} aria-label={`Open ${movie.title}`}>
                     {movie.poster_path ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" /> : <div className="image-placeholder">NO<br />IMAGE</div>}
                     <span className="watch-item-index">{String(index + 1).padStart(2, '0')} / {yearOf(movie)}</span>
                     <h2>{movie.title}</h2>
@@ -815,6 +1086,17 @@ function App() {
         </section>
       )}
 
+      {screen === 'archive-detail' && currentMovie && (
+        <ArchiveFilmView
+          movie={currentMovie}
+          personalMovie={archivePersonalMovie ?? currentMovie}
+          loading={busy}
+          onBack={returnFromDetail}
+          onOpenOriginal={openOriginalMovieFromArchive}
+          onEditReview={() => requestWatched(archivePersonalMovie ?? currentMovie, true, archiveViewingId.current)}
+        />
+      )}
+
       {screen === 'detail' && currentMovie && (
         <section className="detail-screen">
           <button className="back-link" onClick={returnFromDetail}>← BACK</button>
@@ -831,9 +1113,14 @@ function App() {
               <p className="detail-overview">{currentMovie.overview || 'No synopsis available from the archive.'}</p>
               <div className="detail-actions">
                 {hasWatched(currentMovie.id) ? (
-                  <button className="button button-light" onClick={() => { void removeWatched(currentMovie) }} disabled={watchedLoading}>
-                    {watchedLoading ? 'UPDATING…' : 'REMOVE ×'}
-                  </button>
+                  <>
+                    <button className="button button-detail-random" onClick={() => requestWatched(currentMovie)} disabled={busy || watchedLoading}>
+                      {busy ? 'SAVING…' : 'LOG REWATCH'} <span aria-hidden="true">↻</span>
+                    </button>
+                    <button className="button button-light" onClick={() => { void removeWatched(currentMovie) }} disabled={watchedLoading}>
+                      {watchedLoading ? 'UPDATING…' : 'REMOVE ×'}
+                    </button>
+                  </>
                 ) : (
                   <>
                     <button className="button button-light" onClick={() => { void toggle(currentMovie) }} disabled={watchlistLoading} aria-pressed={contains(currentMovie.id)}>
@@ -875,9 +1162,22 @@ function App() {
 
       {(screen === 'auth' || screen === 'settings') && (
         <section className="secondary-screen profile-screen">
-          <p className="eyebrow"><span className="red-mark">✳</span> {screen === 'settings' ? 'SETTINGS / ACCOUNT & PREFERENCES' : user ? 'YOUR PROFILE' : 'SIGN IN / CREATE ACCOUNT'}</p>
-          {screen === 'auth' && !passwordRecovery && user && (
+          <p className="eyebrow"><span className="red-mark">✳</span> {screen === 'settings' ? 'SETTINGS / ACCOUNT & PREFERENCES' : user ? 'YOUR PROFILE' : screen === 'auth' ? 'GUEST / PERSONAL ARCHIVE' : 'SIGN IN / CREATE ACCOUNT'}</p>
+          {screen === 'settings' && !passwordRecovery && (
+            <div className="secondary-heading settings-page-heading">
+              <h1>Settings,<br /><em>in order.</em></h1>
+              <span>{user ? 'ACCOUNT CONTROL' : 'GUEST / THIS BROWSER'}</span>
+            </div>
+          )}
+          {screen === 'auth' && !passwordRecovery && (
+            <div className="secondary-heading profile-page-heading">
+              <h1>Your cinema<br /><em>archive.</em></h1>
+              <span>{user ? 'PERSONAL ARCHIVE' : 'GUEST / THIS BROWSER'}</span>
+            </div>
+          )}
+          {screen === 'auth' && !passwordRecovery && (
             <>
+            <p className="profile-section-label">PROFILE / PERSONAL ARCHIVE</p>
             <section className="profile-identity" style={profile.banner ? {
               backgroundImage: `linear-gradient(90deg, rgba(23,23,21,.78), rgba(23,23,21,.38)), url("${profileImageUrl(profile.banner)}")`,
             } : undefined}>
@@ -887,137 +1187,116 @@ function App() {
                   : <div className="profile-avatar profile-avatar-placeholder" aria-hidden="true">◉</div>}
                 <div>
                   <span className="micro-label">YOUR FILM PROFILE</span>
-                  <h1>{user?.email?.split('@')[0] || 'CINEPHILE'}</h1>
+                  <h2>{profile.username || user?.email?.split('@')[0] || 'GUEST CINEPHILE'}</h2>
                   <p>{profile.favorites.length} / 4 FAVOURITE FILMS</p>
                 </div>
               </div>
-              <span className="profile-identity-index">THE LAST BUTTON / PERSONAL ARCHIVE</span>
+              <span className="profile-identity-index">{user ? 'THE LAST BUTTON / PERSONAL ARCHIVE' : 'LOCAL ARCHIVE / THIS BROWSER'}</span>
             </section>
-            <section className="profile-film-print" aria-labelledby="film-print-title">
-              <div className="profile-film-print-heading">
-                <div>
-                  <span className="micro-label">A RECORD OF YOUR TASTE</span>
-                  <h2 id="film-print-title">Your film<br /><em>print.</em></h2>
-                </div>
-                <span className="profile-film-print-mark" aria-hidden="true">◉</span>
-              </div>
-              {watchedLoading ? (
-                <p className="profile-film-print-loading">DEVELOPING YOUR ARCHIVE…</p>
-              ) : (
-                <>
-                  <div className="profile-stat-grid">
-                    <div className="profile-stat"><strong>{watchedMovies.length}</strong><span>FILMS SEEN</span></div>
-                    <div className="profile-stat"><strong>{averageRating}</strong><span>AVG. RATING / 5</span></div>
-                    <div className="profile-stat"><strong>{ratedMovies.length}</strong><span>FILMS RATED</span></div>
-                    <div className="profile-stat"><strong>{likedMovieCount}</strong><span>IN YOUR HEART</span></div>
-                  </div>
-                  <div className="profile-top-films">
-                    <div className="profile-top-films-heading">
-                      <span className="micro-label">YOUR HIGHEST-RATED</span>
-                      <button className="text-button" onClick={() => setScreen('watched')} disabled={!watchedMovies.length}>OPEN WATCHED ↗</button>
-                    </div>
-                    {topRatedMovies.length ? (
-                      <div className="profile-top-films-list">
-                        {topRatedMovies.map((movie, index) => (
-                          <button className="profile-top-film" key={movie.id} onClick={() => { void openMovie(movie) }}>
-                            {movie.poster_path
-                              ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
-                              : <span className="profile-top-film-placeholder">NO<br />IMAGE</span>}
-                            <span className="profile-top-film-copy">
-                              <span className="profile-top-film-rank">0{index + 1} / {movie.user_rating} ★</span>
-                              <strong>{movie.title}</strong>
-                              <span>{yearOf(movie)}</span>
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="profile-top-films-empty">
-                        {watchedMovies.length ? 'Rate a watched film to start your personal top three.' : 'Mark films watched and rate them to build your film print.'}
-                      </p>
-                    )}
-                  </div>
-                </>
-              )}
-            </section>
-            <section className="profile-favorites" aria-labelledby="profile-favorites-title">
-              <div className="profile-favorites-heading">
-                <div>
-                  <span className="micro-label">FOUR FILMS THAT STAY</span>
-                  <h2 id="profile-favorites-title">The favourites.</h2>
-                </div>
-                <span>{String(profile.favorites.length).padStart(2, '0')} / 04</span>
-              </div>
-              <div className="profile-favorites-grid">
-                {[0, 1, 2, 3].map((slot) => {
-                  const movie = profile.favorites[slot]
-                  return movie ? (
-                    <button className="profile-favorite-film" key={movie.id} onClick={() => { void openMovie(movie) }}>
-                      {movie.poster_path
-                        ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
-                        : <span className="profile-favorite-placeholder">NO<br />IMAGE</span>}
-                      <span className="profile-favorite-title">{movie.title}</span>
-                      <span className="profile-favorite-year">{yearOf(movie)}</span>
-                    </button>
-                  ) : (
-                    <div className="profile-favorite-empty" key={`empty-${slot}`}>
-                      <span>0{slot + 1}</span>
-                      <p>FAVOURITE<br />NOT SET</p>
-                    </div>
-                  )
-                })}
-              </div>
-            </section>
-            <section className="profile-favorites profile-recent-films" aria-labelledby="profile-recent-title">
-              <div className="profile-favorites-heading">
-                <div>
-                  <span className="micro-label">FRESH FROM THE ARCHIVE</span>
-                  <h2 id="profile-recent-title">Recently watched.</h2>
-                </div>
-                <button className="text-button" onClick={() => setScreen('watched')} disabled={!watchedMovies.length}>OPEN WATCHED ↗</button>
-              </div>
-              {watchedMovies.length ? (
-                <div className="profile-favorites-grid">
-                  {watchedMovies.slice(0, 4).map((movie) => (
-                    <button className="profile-favorite-film" key={movie.id} onClick={() => { void openMovie(movie) }}>
-                      {movie.poster_path
-                        ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
-                        : <span className="profile-favorite-placeholder">NO<br />IMAGE</span>}
-                      <span className="profile-favorite-title">{movie.title}</span>
-                      <span className="profile-favorite-year">{yearOf(movie)}</span>
-                      {movie.user_rating !== null && movie.user_rating !== undefined && (
-                        <span className="profile-favorite-year">{movie.user_rating} / 5 ★</span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <p className="profile-top-films-empty">Films you mark as watched will appear here.</p>
-              )}
-            </section>
+            {profileError && <p className="inline-error" role="alert">{profileError}</p>}
+            <CinemaArchive
+              watchedMovies={watchedMovies}
+              watchlistCount={watchlistError ? '—' : watchlist.length}
+              ratedCount={ratedMovies.length}
+              averageRating={averageRating}
+              likedCount={watchedMovies.filter((movie) => movie.user_liked).length}
+              currentStreak={streakError ? '—' : dailyStreak}
+              bestStreak={streakError ? '—' : bestDailyStreak}
+              favorites={profile.favorites}
+              collections={profile.collections}
+              section={archiveSection}
+              onSectionChange={setArchiveSection}
+              loading={watchedLoading || profileLoading || streakLoading || Boolean(user && profileError)}
+              onSaveCollections={saveCollections}
+              onOpenMovie={(movie) => { void openMovie(movie) }}
+              onOpenWatchedMovie={(movie, viewingId) => { void openArchiveMovie(movie, viewingId) }}
+              onOpenWatched={() => setScreen('watched')}
+            />
             </>
           )}
-          {screen === 'auth' && !passwordRecovery && user && (
-            <div className="profile-settings-entry">
-              <p className="account-description">Account details, diary import, and profile controls live in settings.</p>
-              <button className="button button-dark" onClick={() => setScreen('settings')}>OPEN SETTINGS <span aria-hidden="true">↗</span></button>
-            </div>
-          )}
           {screen === 'settings' && !passwordRecovery && (
-            <ProfileEditor
-              profile={profile}
-              loading={profileLoading}
-              error={profileError}
-              onSave={saveProfile}
-              onUpload={updateImage}
-              search={favoriteSearch}
-              setSearch={setFavoriteSearch}
-              results={favoriteResults}
-              searching={favoriteSearchBusy}
-              searchError={favoriteSearchError}
-            />
+            <>
+              <section className="settings-appearance" aria-labelledby="appearance-title">
+                <div>
+                  <span className="micro-label">APPEARANCE / GLOBAL</span>
+                  <h2 id="appearance-title">Choose your<br /><em>light.</em></h2>
+                </div>
+                <label className="settings-theme-field" htmlFor="theme-preference">
+                  <span>THEME PREFERENCE</span>
+                  <select
+                    id="theme-preference"
+                    value={themePreference}
+                    onChange={(event) => {
+                      if (isThemePreference(event.target.value)) setThemePreference(event.target.value)
+                    }}
+                  >
+                    <option value="light">Light theme</option>
+                    <option value="dark">Dark theme</option>
+                    <option value="system">Follow system</option>
+                  </select>
+                </label>
+              </section>
+              <TasteProfileEditor
+                tasteProfile={profile.tasteProfile}
+                disabled={!tasteProfileReady}
+                error={user ? profileError : ''}
+                onSave={saveTasteProfile}
+              />
+              <section className="settings-profile-controls" aria-label="Profile picture, banner, and favourite films">
+                <ProfileEditor
+                  profile={profile}
+                  loading={profileLoading}
+                  error={profileError}
+                  onSave={saveFavorites}
+                  onUpload={updateImage}
+                  search={favoriteSearch}
+                  setSearch={setFavoriteSearch}
+                  results={favoriteResults}
+                  searching={favoriteSearchBusy}
+                  searchError={favoriteSearchError}
+                />
+              </section>
+            </>
           )}
-          {(screen === 'settings' || passwordRecovery || (screen === 'auth' && !user)) && (passwordRecovery ? (
+          {screen === 'settings' && (
+            <section className="settings-account-section" aria-labelledby="account-details-title">
+              <div className="settings-section-heading">
+                <span className="micro-label">ACCOUNT / SIGN-IN & ACCESS</span>
+                <h2 id="account-details-title">Account<br /><em>details.</em></h2>
+              </div>
+              <div className="account-panel">
+              <span className="micro-label">YOUR IDENTITY</span>
+              <UsernameEditor
+                username={profile.username}
+                fallbackUsername={user?.email?.split('@')[0] || 'CINEPHILE'}
+                disabled={profileLoading}
+                error={profileError}
+                onSave={saveUsername}
+              />
+              {user && <>
+              <span className="micro-label">SIGNED IN AS</span>
+              <p>{user.email}</p>
+              <p className="account-description">Your watchlist is saved to your account and available when you sign in on another device.</p>
+              <button className="button button-dark" onClick={() => { void signOut() }}>SIGN OUT</button>
+              <div className="danger-zone">
+                <span className="micro-label">ACCOUNT CONTROL</span>
+                <p className="account-description">Permanently delete your account and its synced watchlists. This cannot be undone.</p>
+                {deleteConfirm ? (
+                  <div className="delete-confirm-actions">
+                    <button className="button button-delete" onClick={() => { void deleteAccount() }} disabled={deleteBusy}>
+                      {deleteBusy ? 'DELETING…' : 'CONFIRM DELETE'}
+                    </button>
+                    <button className="text-button" onClick={() => setDeleteConfirm(false)} disabled={deleteBusy}>CANCEL</button>
+                  </div>
+                ) : (
+                  <button className="text-button delete-trigger" onClick={() => setDeleteConfirm(true)}>DELETE ACCOUNT</button>
+                )}
+              </div>
+              </>}
+              </div>
+            </section>
+          )}
+          {(passwordRecovery || (screen === 'auth' && !user)) && (passwordRecovery ? (
             <>
               <div className="secondary-heading"><h1>Settings,<br /><em>password.</em></h1><span>SECURE RESET</span></div>
               <div className="account-panel">
@@ -1030,34 +1309,6 @@ function App() {
                     {authBusy ? 'UPDATING…' : 'UPDATE PASSWORD'} <span aria-hidden="true">↗</span>
                   </button>
                 </form>
-              </div>
-            </>
-          ) : screen === 'settings' && user ? (
-            <>
-              <div className="secondary-heading settings-page-heading"><h1>Settings,<br /><em>in order.</em></h1><span>ACCOUNT CONTROL</span></div>
-              <div className="account-panel">
-                <div className="account-settings-heading">
-                  <span className="micro-label">ACCOUNT SETTINGS / PROFILE ACTIVE</span>
-                  <h2>Your films,<br /><em>in sync.</em></h2>
-                </div>
-                <span className="micro-label">SIGNED IN AS</span>
-                <p>{user.email}</p>
-                <p className="account-description">Your watchlist is saved to your account and available when you sign in on another device.</p>
-                <button className="button button-dark" onClick={() => { void signOut() }}>SIGN OUT</button>
-                <div className="danger-zone">
-                  <span className="micro-label">ACCOUNT CONTROL</span>
-                  <p className="account-description">Permanently delete your account and its synced watchlists. This cannot be undone.</p>
-                  {deleteConfirm ? (
-                    <div className="delete-confirm-actions">
-                      <button className="button button-delete" onClick={() => { void deleteAccount() }} disabled={deleteBusy}>
-                        {deleteBusy ? 'DELETING…' : 'CONFIRM DELETE'}
-                      </button>
-                      <button className="text-button" onClick={() => setDeleteConfirm(false)} disabled={deleteBusy}>CANCEL</button>
-                    </div>
-                  ) : (
-                    <button className="text-button delete-trigger" onClick={() => setDeleteConfirm(true)}>DELETE ACCOUNT</button>
-                  )}
-                </div>
               </div>
             </>
           ) : (
@@ -1103,7 +1354,12 @@ function App() {
             </>
           ))}
           {screen === 'settings' && !passwordRecovery && (
-            <div className="diary-import">
+            <section className="diary-import-settings" aria-labelledby="diary-import-title">
+              <div className="settings-section-heading">
+                <span className="micro-label">WATCHED FILMS / TRANSFER</span>
+                <h2 id="diary-import-title">Diary<br /><em>import.</em></h2>
+              </div>
+              <div className="diary-import">
               <div>
                 <span className="micro-label">LETTERBOXD DIARY IMPORT</span>
                 <p>Bring your watched films over from a Letterboxd diary CSV. Only unique title-and-year matches are added; imports do not change your daily streak.</p>
@@ -1128,10 +1384,11 @@ function App() {
                   Import complete: {diaryImportReport.imported} added, {diaryImportReport.alreadySaved} already watched, {diaryImportReport.skipped} skipped because no unique exact match was found.
                 </p>
               )}
-            </div>
+              </div>
+            </section>
           )}
           {screen === 'settings'
-            ? <button className="back-link" onClick={() => setScreen('auth')}>← BACK TO PROFILE</button>
+            ? <button className="back-link" onClick={returnHome}>← BACK TO HOME</button>
             : user && !passwordRecovery && <button className="back-link" onClick={returnHome}>← BACK TO HOME</button>}
         </section>
       )}
@@ -1169,6 +1426,7 @@ function App() {
                 {pendingRating !== null && <span className="review-modal-rating-value">{pendingRating} / 5</span>}
               </div>
             </div>
+            {pendingWatchedEditOnly && watchedError && <p className="inline-error" role="alert">{watchedError}</p>}
             <button
               className={`review-modal-like${pendingLiked ? ' is-liked' : ''}`}
               type="button"
@@ -1193,10 +1451,13 @@ function App() {
             <div className="review-modal-actions">
               <button
                 className="button button-dark"
-                onClick={() => { void markWatchedAndDiscover(pendingWatchedMovie, pendingRating, pendingReview, pendingLiked) }}
+                onClick={() => {
+                  if (pendingWatchedEditOnly) void saveArchiveReview(pendingWatchedMovie, pendingRating, pendingReview, pendingLiked, pendingWatchedViewingId)
+                  else void markWatchedAndDiscover(pendingWatchedMovie, pendingRating, pendingReview, pendingLiked)
+                }}
                 disabled={busy}
               >
-                {busy ? 'SAVING…' : 'LOG VIEWING'} <span aria-hidden="true">↗</span>
+                {busy ? 'SAVING…' : pendingWatchedEditOnly ? 'SAVE YOUR NOTE' : hasWatched(pendingWatchedMovie.id) ? 'LOG REWATCH' : 'LOG VIEWING'} <span aria-hidden="true">↗</span>
               </button>
             </div>
           </section>

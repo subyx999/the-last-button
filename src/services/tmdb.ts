@@ -1,4 +1,4 @@
-import type { Movie } from '../types'
+import type { Movie, TasteProfile } from '../types'
 
 const API_ROOT = 'https://api.themoviedb.org/3'
 const API_KEY = import.meta.env.VITE_TMDB_API_KEY
@@ -99,7 +99,7 @@ export async function findExactMovie(title: string, year: number): Promise<Movie
 
 export async function searchMovies(query: string): Promise<Movie[]> {
   const normalizedQuery = query.trim()
-  if (normalizedQuery.length < 2) return []
+  if (!normalizedQuery) return []
   const params = new URLSearchParams({ query: normalizedQuery, include_adult: 'false', page: '1' })
   const result = await request<{ results?: Movie[] }>(`/search/movie?${params.toString()}`)
   return (result.results ?? []).filter((movie) => Boolean(movie.id && movie.title)).slice(0, 8)
@@ -111,13 +111,14 @@ export async function getMovieGenres(): Promise<MovieGenre[]> {
 }
 
 export async function discoverMoviesByGenre(genreIds: readonly number[]): Promise<Movie[]> {
-  if (!genreIds.length) return []
+  const selectedGenres = [...new Set(genreIds.filter((genreId) => Number.isInteger(genreId) && genreId > 0))]
+  if (!selectedGenres.length) return []
 
   const params = new URLSearchParams({
     include_adult: 'false',
     sort_by: 'popularity.desc',
     page: '1',
-    with_genres: genreIds.join('|'),
+    with_genres: selectedGenres.join(','),
     'primary_release_date.lte': currentDateString(),
   })
   const result = await request<{ results?: Movie[] }>(`/discover/movie?${params.toString()}`)
@@ -136,7 +137,10 @@ export async function getMovieOfTheDay(date = new Date()): Promise<Movie> {
   return movie
 }
 
-export async function getRandomMovie(excludedIds: ReadonlySet<number> = new Set()): Promise<Movie> {
+export async function getRandomMovie(
+  excludedIds: ReadonlySet<number> = new Set(),
+  tasteProfile?: TasteProfile,
+): Promise<Movie> {
   const attemptedPages = new Set<number>()
   const sortModes: Array<{ sortBy: string; minimumVotes?: string }> = [
     { sortBy: 'popularity.desc' },
@@ -146,10 +150,44 @@ export async function getRandomMovie(excludedIds: ReadonlySet<number> = new Set(
   ]
   const sortMode = sortModes[Math.floor(Math.random() * sortModes.length)]
   const today = currentDateString()
+  const filters = new URLSearchParams()
+  const usesTasteFilters = Boolean(tasteProfile && (
+    tasteProfile.preferredGenreIds.length
+    || tasteProfile.dislikedGenreIds.length
+    || tasteProfile.preferredLanguages.length
+    || tasteProfile.releasePeriod !== 'any'
+  ))
+  if (tasteProfile) {
+    if (tasteProfile.preferredGenreIds.length) {
+      filters.set('with_genres', tasteProfile.preferredGenreIds.join('|'))
+    }
+    if (tasteProfile.dislikedGenreIds.length) {
+      filters.set('without_genres', tasteProfile.dislikedGenreIds.join(','))
+    }
+    if (tasteProfile.preferredLanguages.length) {
+      filters.set('with_original_language', tasteProfile.preferredLanguages.join('|'))
+    }
+    if (tasteProfile.releasePeriod !== 'any') {
+      const periodStart = tasteProfile.releasePeriod === 'before-1960'
+        ? undefined
+        : Number(tasteProfile.releasePeriod.slice(0, 4))
+      const periodEnd = tasteProfile.releasePeriod === 'before-1960'
+        ? '1959-12-31'
+        : tasteProfile.releasePeriod === '2020s'
+          ? today
+          : `${Number(tasteProfile.releasePeriod.slice(0, 4)) + 9}-12-31`
+      if (periodStart) filters.set('primary_release_date.gte', `${periodStart}-01-01`)
+      filters.set('primary_release_date.lte', periodEnd)
+    }
+  }
+  let maximumPage = usesTasteFilters ? 1 : 500
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    let page = Math.floor(Math.random() * 500) + 1
-    while (attemptedPages.has(page)) page = (page % 500) + 1
+    if (attemptedPages.size >= maximumPage) break
+    let page = usesTasteFilters && attempt === 0
+      ? 1
+      : Math.floor(Math.random() * maximumPage) + 1
+    while (attemptedPages.has(page)) page = (page % maximumPage) + 1
     attemptedPages.add(page)
 
     const params = new URLSearchParams({
@@ -158,10 +196,19 @@ export async function getRandomMovie(excludedIds: ReadonlySet<number> = new Set(
       'primary_release_date.lte': today,
       sort_by: sortMode.sortBy,
     })
+    filters.forEach((value, key) => {
+      if (key !== 'primary_release_date.lte') params.set(key, value)
+    })
+    if (filters.has('primary_release_date.lte')) {
+      params.set('primary_release_date.lte', filters.get('primary_release_date.lte') ?? today)
+    }
     if (sortMode.minimumVotes) params.set('vote_count.gte', sortMode.minimumVotes)
-    const result = await request<{ results?: Movie[] }>(
+    const result = await request<{ results?: Movie[]; total_pages?: number }>(
       `/discover/movie?${params.toString()}`,
     )
+    if (usesTasteFilters && result.total_pages) {
+      maximumPage = Math.max(1, Math.min(500, result.total_pages))
+    }
     const validMovies = (result.results ?? []).filter(
       (movie) => movie.id && movie.title && isReleasedMovie(movie, today) && !excludedIds.has(movie.id),
     )

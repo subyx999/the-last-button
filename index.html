@@ -5,6 +5,27 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f2efe7" />
     <meta name="description" content="One movie. One day. Your next two hours have been claimed." />
+    <script>
+      (() => {
+        const key = 'tlb-theme'
+        let saved = null
+        try {
+          saved = localStorage.getItem(key)
+        } catch (error) {
+          console.warn('Could not read the saved appearance preference.', error)
+        }
+        const preference = saved === 'light' || saved === 'dark' || saved === 'system' ? saved : 'light'
+        const theme = preference === 'system'
+          ? matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          : preference
+        const root = document.documentElement
+        root.dataset.theme = theme
+        root.dataset.themePreference = preference
+        root.style.colorScheme = theme
+        const themeColor = document.querySelector('meta[name="theme-color"]')
+        if (themeColor) themeColor.content = theme === 'dark' ? '#171715' : '#f2efe7'
+      })()
+    </script>
     <link rel="preconnect" href="https://api.themoviedb.org" />
     <link rel="preconnect" href="https://image.tmdb.org" crossorigin />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
