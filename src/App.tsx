@@ -137,6 +137,7 @@ function App() {
   const [authPasswordConfirmation, setAuthPasswordConfirmation] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
   const [authMessage, setAuthMessage] = useState('')
+  const [resetPasswordError, setResetPasswordError] = useState('')
   const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [diaryImportBusy, setDiaryImportBusy] = useState(false)
@@ -175,6 +176,7 @@ function App() {
   const detailReturnScreen = useRef<Screen>('home')
   const archiveDetailHistory = useRef(false)
   const archiveViewingId = useRef<string | undefined>(undefined)
+  const authSubmitInFlight = useRef(false)
   const {
     user,
     loading: authLoading,
@@ -657,13 +659,18 @@ function App() {
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (authSubmitInFlight.current) return
+    authSubmitInFlight.current = true
     setAuthBusy(true)
     setAuthMessage('')
+    if (authMode === 'reset-password') setResetPasswordError('')
     clearSessionError()
 
     if (!supabase) {
-      setSessionError(SUPABASE_SETUP_MESSAGE)
+      if (authMode === 'reset-password') setResetPasswordError(SUPABASE_SETUP_MESSAGE)
+      else setSessionError(SUPABASE_SETUP_MESSAGE)
       setAuthBusy(false)
+      authSubmitInFlight.current = false
       return
     }
 
@@ -709,8 +716,11 @@ function App() {
         setScreen('home')
       }
     } catch (cause) {
-      setSessionError(cause instanceof Error ? cause.message : 'Could not complete sign in. Please try again.')
+      const message = cause instanceof Error ? cause.message : 'Could not complete sign in. Please try again.'
+      if (authMode === 'reset-password') setResetPasswordError(message)
+      else setSessionError(message)
     } finally {
+      authSubmitInFlight.current = false
       setAuthBusy(false)
     }
   }
@@ -1364,6 +1374,7 @@ function App() {
                 <form className="auth-form" onSubmit={(event) => { void submitAuth(event) }}>
                   <label htmlFor="auth-email">EMAIL ADDRESS</label>
                   <input id="auth-email" type="email" autoComplete="email" required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} />
+                  {authMode === 'reset-password' && resetPasswordError && <p className="inline-error" role="alert">{resetPasswordError}</p>}
                   {authMode !== 'reset-password' && <>
                     <label htmlFor="auth-password">PASSWORD</label>
                     <input id="auth-password" type="password" autoComplete={authMode === 'sign-up' ? 'new-password' : 'current-password'} minLength={6} required value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} />
@@ -1373,8 +1384,8 @@ function App() {
                     {authBusy ? 'PLEASE WAIT…' : authMode === 'reset-password' ? 'SEND RESET LINK' : authMode === 'sign-up' ? 'CREATE ACCOUNT' : 'SIGN IN'} <span aria-hidden="true">↗</span>
                   </button>
                 </form>
-                {authMode === 'sign-in' && <button className="text-button forgot-password" onClick={() => { setAuthMode('reset-password'); setAuthMessage(''); clearSessionError() }}>FORGOT PASSWORD?</button>}
-                {authMode === 'reset-password' && <button className="text-button forgot-password" onClick={() => { setAuthMode('sign-in'); setAuthMessage(''); clearPasswordRecoveryError(); clearSessionError() }}>← BACK TO SIGN IN</button>}
+                {authMode === 'sign-in' && <button className="text-button forgot-password" onClick={() => { setAuthMode('reset-password'); setAuthMessage(''); setResetPasswordError(''); clearSessionError() }}>FORGOT PASSWORD?</button>}
+                {authMode === 'reset-password' && <button className="text-button forgot-password" onClick={() => { setAuthMode('sign-in'); setAuthMessage(''); setResetPasswordError(''); clearPasswordRecoveryError(); clearSessionError() }}>← BACK TO SIGN IN</button>}
                 {authMode !== 'reset-password' && (
                   <button className="button button-light continue-as-guest" type="button" onClick={() => {
                     setAuthEmail('')
