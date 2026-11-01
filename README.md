@@ -22,10 +22,9 @@ The site works without an account. Guest watchlists stay in that browser's local
 4. Run [`supabase/watched.sql`](./supabase/watched.sql) to create the separate watched-movie table and its per-user row security policies.
 5. Run [`supabase/streak.sql`](./supabase/streak.sql) to create the daily Movie-of-the-Day streak history table and its per-user row security policies.
 6. Run [`supabase/profile.sql`](./supabase/profile.sql) to enable profile pictures, banners, and favorite films with per-user profile policies and a public image bucket.
-7. In Supabase Authentication settings, configure the site's local and deployed redirect URLs and choose whether email confirmation is required.
-8. In Authentication → URL Configuration, add the local and deployed site URLs as allowed redirect URLs for password recovery and email confirmation.
-9. Deploy the account-deletion Edge Function from the project root with the Supabase CLI: `supabase functions deploy delete-account`. Supabase supplies the function's server-side `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`; never put the service-role key in `.env` or browser code.
-10. Restart the dev server. Use **SIGN IN** to create an account or sign in. Existing guest lists are merged into the account after sign-in.
+7. In Supabase Authentication settings, set the Site URL to `https://the-last-button.vercel.app` and choose whether email confirmation is required. Add `http://localhost:5173/**` and `https://the-last-button.vercel.app/**` under **Authentication → URL Configuration → Redirect URLs**. Password recovery returns to the app root with `?flow=recovery`; ensure both local and production root URLs are allowed. Supabase falls back to the Site URL when a requested redirect is not allowlisted.
+8. Deploy the account-deletion Edge Function from the project root with the Supabase CLI: `supabase functions deploy delete-account`. Supabase supplies the function's server-side `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`; never put the service-role key in `.env` or browser code.
+9. Restart the dev server. Use **SIGN IN** to create an account or sign in. Existing guest lists are merged into the account after sign-in.
 
 Signed-in watchlists and watched films are stored in Supabase and are available on other devices after signing in. Guest watchlists and watched films stay in browser localStorage; each is merged into the matching account table on sign-in and cleared from local storage after a successful migration. Signing out returns to guest mode with separate local-only lists.
 

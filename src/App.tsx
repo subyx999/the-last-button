@@ -40,6 +40,11 @@ function initialThemePreference(): ThemePreference {
   return isThemePreference(preference) ? preference : 'light'
 }
 
+function passwordRecoveryRedirectUrl() {
+  const origin = import.meta.env.DEV ? window.location.origin : 'https://the-last-button.vercel.app'
+  return new URL('/?flow=recovery', origin).toString()
+}
+
 function applyTheme(preference: ThemePreference) {
   const theme = preference === 'system'
     ? window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
@@ -129,6 +134,7 @@ function App() {
   const [authMode, setAuthMode] = useState<AuthMode>('sign-in')
   const [authEmail, setAuthEmail] = useState('')
   const [authPassword, setAuthPassword] = useState('')
+  const [authPasswordConfirmation, setAuthPasswordConfirmation] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
   const [authMessage, setAuthMessage] = useState('')
   const [deleteConfirm, setDeleteConfirm] = useState(false)
@@ -169,7 +175,17 @@ function App() {
   const detailReturnScreen = useRef<Screen>('home')
   const archiveDetailHistory = useRef(false)
   const archiveViewingId = useRef<string | undefined>(undefined)
-  const { user, loading: authLoading, error: sessionError, passwordRecovery, clearPasswordRecovery, clearError: clearSessionError, setError: setSessionError } = useAuth()
+  const {
+    user,
+    loading: authLoading,
+    error: sessionError,
+    passwordRecovery,
+    passwordRecoveryError,
+    clearPasswordRecovery,
+    clearPasswordRecoveryError,
+    clearError: clearSessionError,
+    setError: setSessionError,
+  } = useAuth()
   const { profile, loading: profileLoading, error: profileError, saveCollections, saveFavorites, saveTasteProfile, saveUsername, updateImage } = useProfile(user?.id)
   const { movies: watchlist, contains, toggle, loading: watchlistLoading, error: watchlistError, retry: retryWatchlist } = useWatchlist(user?.id)
   const {
@@ -391,11 +407,21 @@ function App() {
 
   useEffect(() => {
     if (passwordRecovery) {
+      setAuthPassword('')
+      setAuthPasswordConfirmation('')
       setAuthMode('update-password')
       setAuthMessage('')
       setScreen('auth')
     }
   }, [passwordRecovery])
+
+  useEffect(() => {
+    if (passwordRecoveryError) {
+      setAuthMode('reset-password')
+      setAuthMessage('')
+      setScreen('auth')
+    }
+  }, [passwordRecoveryError])
 
   async function discoverRandom(additionalExcludedIds: ReadonlySet<number> = new Set()) {
     setBusy(true)
@@ -644,18 +670,25 @@ function App() {
     try {
       if (authMode === 'reset-password') {
         const { error: resetError } = await supabase.auth.resetPasswordForEmail(authEmail, {
-          redirectTo: `${window.location.origin}/`,
+          redirectTo: passwordRecoveryRedirectUrl(),
         })
         if (resetError) throw resetError
+        clearPasswordRecoveryError()
         setAuthMessage('If an account exists for that email, a password reset link is on its way.')
         return
       }
 
       if (authMode === 'update-password') {
+        if (authPassword !== authPasswordConfirmation) {
+          setSessionError('Your passwords do not match.')
+          return
+        }
         const { error: updateError } = await supabase.auth.updateUser({ password: authPassword })
         if (updateError) throw updateError
         clearPasswordRecovery()
+        clearPasswordRecoveryError()
         setAuthPassword('')
+        setAuthPasswordConfirmation('')
         setAuthMode('sign-in')
         setScreen('home')
         setAuthMessage('Your password has been updated.')
@@ -1169,13 +1202,13 @@ function App() {
               <span>{user ? 'ACCOUNT CONTROL' : 'GUEST / THIS BROWSER'}</span>
             </div>
           )}
-          {screen === 'auth' && !passwordRecovery && (
+          {screen === 'auth' && !passwordRecovery && !passwordRecoveryError && (
             <div className="secondary-heading profile-page-heading">
               <h1>Your cinema<br /><em>archive.</em></h1>
               <span>{user ? 'PERSONAL ARCHIVE' : 'GUEST / THIS BROWSER'}</span>
             </div>
           )}
-          {screen === 'auth' && !passwordRecovery && (
+          {screen === 'auth' && !passwordRecovery && !passwordRecoveryError && (
             <>
             <p className="profile-section-label">PROFILE / PERSONAL ARCHIVE</p>
             <section className="profile-identity" style={profile.banner ? {
@@ -1296,7 +1329,7 @@ function App() {
               </div>
             </section>
           )}
-          {(passwordRecovery || (screen === 'auth' && !user)) && (passwordRecovery ? (
+          {(passwordRecovery || passwordRecoveryError || (screen === 'auth' && !user)) && (passwordRecovery ? (
             <>
               <div className="secondary-heading"><h1>Settings,<br /><em>password.</em></h1><span>SECURE RESET</span></div>
               <div className="account-panel">
@@ -1304,6 +1337,8 @@ function App() {
                 <form className="auth-form" onSubmit={(event) => { void submitAuth(event) }}>
                   <label htmlFor="auth-password">NEW PASSWORD</label>
                   <input id="auth-password" type="password" autoComplete="new-password" minLength={6} required value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} />
+                  <label htmlFor="auth-password-confirmation">CONFIRM NEW PASSWORD</label>
+                  <input id="auth-password-confirmation" type="password" autoComplete="new-password" minLength={6} required value={authPasswordConfirmation} onChange={(event) => setAuthPasswordConfirmation(event.target.value)} />
                   {authMessage && <p className="auth-message" role="status">{authMessage}</p>}
                   <button className="button button-dark" type="submit" disabled={authBusy}>
                     {authBusy ? 'UPDATING…' : 'UPDATE PASSWORD'} <span aria-hidden="true">↗</span>
@@ -1315,6 +1350,7 @@ function App() {
             <>
               <div className="secondary-heading settings-page-heading"><h1>{authMode === 'reset-password' ? <>Reset your<br /><em>password.</em></> : <>Sign in or<br /><em>join us.</em></>}</h1><span>GUEST MODE ALWAYS AVAILABLE</span></div>
               <div className="account-panel">
+                {passwordRecoveryError && <p className="inline-error" role="alert">{passwordRecoveryError}</p>}
                 <p className="account-description">
                   {authMode === 'reset-password'
                     ? 'Enter your account email and we’ll send a secure password reset link.'
@@ -1338,7 +1374,7 @@ function App() {
                   </button>
                 </form>
                 {authMode === 'sign-in' && <button className="text-button forgot-password" onClick={() => { setAuthMode('reset-password'); setAuthMessage(''); clearSessionError() }}>FORGOT PASSWORD?</button>}
-                {authMode === 'reset-password' && <button className="text-button forgot-password" onClick={() => { setAuthMode('sign-in'); setAuthMessage(''); clearSessionError() }}>← BACK TO SIGN IN</button>}
+                {authMode === 'reset-password' && <button className="text-button forgot-password" onClick={() => { setAuthMode('sign-in'); setAuthMessage(''); clearPasswordRecoveryError(); clearSessionError() }}>← BACK TO SIGN IN</button>}
                 {authMode !== 'reset-password' && (
                   <button className="button button-light continue-as-guest" type="button" onClick={() => {
                     setAuthEmail('')
