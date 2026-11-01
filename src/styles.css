@@ -208,6 +208,7 @@ h1, h2, p { margin-top: 0; }
 .archive-section-heading h2 em, .archive-overview-lower h3 em { font-family: Georgia, serif; font-weight: 400; }
 .archive-stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .archive-stat-grid .profile-stat { min-height: 92px; }
+.archive-stat-grid .profile-stat:nth-child(3n + 1) { padding-left: 0; }
 .archive-stat-grid .profile-stat:nth-child(3n) { border-right: 0; }
 .archive-stat-grid .profile-stat:nth-child(n + 4) { border-top: 1px solid rgba(var(--border-rgb),.2); }
 .archive-overview-lower { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: 30px; margin: 30px 0 35px; }
@@ -658,11 +659,20 @@ h1, h2, p { margin-top: 0; }
   .archive-diary-note { font-size: 12px; }
   .archive-overview-lower { grid-template-columns: 1fr; gap: 24px; }
   .archive-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .archive-stat-grid .profile-stat:nth-child(1) { grid-area: 1 / 1; }
+  .archive-stat-grid .profile-stat:nth-child(2) { grid-area: 1 / 2; }
+  .archive-stat-grid .profile-stat:nth-child(3) { grid-area: 2 / 2; }
+  .archive-stat-grid .profile-stat:nth-child(4) { grid-area: 2 / 1; }
+  .archive-stat-grid .profile-stat:nth-child(5) { grid-area: 3 / 1; }
+  .archive-stat-grid .profile-stat:nth-child(6) { grid-area: 3 / 2; }
   .archive-stat-grid .profile-stat:nth-child(2n) { border-right: 0; }
-  .archive-stat-grid .profile-stat:nth-child(3n) { border-right: 1px solid rgba(var(--border-rgb),.2); }
+  .archive-stat-grid .profile-stat:nth-child(3n) { border-right: 0; }
+  .archive-stat-grid .profile-stat:nth-child(4) { border-right: 1px solid rgba(var(--border-rgb),.2); }
   .archive-stat-grid .profile-stat:nth-child(n + 3) { border-top: 1px solid rgba(var(--border-rgb),.2); }
+  .archive-stat-grid .profile-stat:nth-child(n + 5) { border-top: 1px solid rgba(var(--border-rgb),.2); }
   .archive-stat-grid .profile-stat:nth-child(2n) { padding-left: 18px; }
-  .archive-stat-grid .profile-stat:nth-child(3n) { padding-left: 0; }
+  .archive-stat-grid .profile-stat:nth-child(3) { padding-left: 18px; }
+  .archive-stat-grid .profile-stat:nth-child(4) { padding-left: 0; }
   .archive-section-heading h2 { font-size: clamp(40px, 10vw, 60px); }
   .archive-film-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px 12px; }
   .archive-list-heading { align-items: flex-start; }
