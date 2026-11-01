@@ -403,6 +403,8 @@ h1, h2, p { margin-top: 0; }
 .auth-form label { margin-top: 7px; color: var(--muted); font: 9px var(--mono); letter-spacing: .08em; }
 .auth-form input { width: min(100%, 390px); height: 42px; border: 1px solid var(--input-border); background: var(--field); padding: 0 11px; color: var(--ink); font: 13px var(--mono); }
 .auth-form .button { margin-top: 12px; }
+.google-auth-button { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+.google-auth-icon { width: 16px; height: 16px; flex: 0 0 auto; }
 .auth-message { color: var(--success); font: 11px/1.5 var(--mono); margin: 8px 0 0; }
 .account-panel .inline-error { max-width: 520px; margin: 18px 0; }
 .forgot-password { margin-top: 20px; color: var(--red); }
