@@ -35,7 +35,7 @@ export default function ArchiveFilmView({ movie, personalMovie, loading, onBack,
           <p className="eyebrow"><span className="red-mark">✳</span> PERSONAL ARCHIVE / VIEWING NOTE</p>
           <span className="archive-film-number">TMDB RECORD / {String(movie.id).padStart(6, '0')}</span>
         </div>
-        <span className="archive-film-issue">BUTTON<br />A PERSONAL VIEWING RECORD</span>
+        <span className="archive-film-issue">Button.<br />A PERSONAL VIEWING RECORD</span>
       </header>
       <div className="archive-film-titleband">
         <span className="archive-film-side-index" aria-hidden="true">VIEWING NOTE / {String(movie.id).padStart(6, '0')}</span>
