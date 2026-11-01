@@ -1,4 +1,4 @@
-# The Last Button
+# Button
 
 A deliberately small movie-discovery app: one deterministic Movie of the Day, a random movie button, and a local watchlist.
 

@@ -883,8 +883,8 @@ function App() {
   return (
     <main className="site-shell">
       <header className="topbar">
-        <button className="wordmark" onClick={returnHome} aria-label="The Last Button, home">
-          <span className="wordmark-icon">◉</span> THE LAST BUTTON
+        <button className="wordmark" onClick={returnHome} aria-label="Button, home">
+          <span className="wordmark-icon">◉</span> BUTTON
         </button>
         <div className="topbar-status" aria-label={`Today's date: ${localDateLabel}, ${localWeekday}`}>
           <span className="topbar-date-label">TODAY’S DATE</span>
@@ -975,7 +975,7 @@ function App() {
             </div>
           </section>
 
-          <footer className="site-footer"><span>THE LAST BUTTON © 2026</span><span>YOUR NEXT TWO HOURS HAVE BEEN CLAIMED.</span><span>DATA: TMDB ↗</span></footer>
+          <footer className="site-footer"><span>BUTTON © 2026</span><span>YOUR NEXT TWO HOURS HAVE BEEN CLAIMED.</span><span>DATA: TMDB ↗</span></footer>
         </>
       )}
 
@@ -997,7 +997,7 @@ function App() {
           </header>
           <div className="discovery-workbench">
             <aside className="discovery-rail" aria-label="Archive information">
-              <span>THE LAST BUTTON</span>
+              <span>BUTTON</span>
               <span>EST. IN THE MOMENT</span>
               <span>SEARCH / FILTER / WANDER</span>
             </aside>
@@ -1303,7 +1303,7 @@ function App() {
                   <p>{profile.favorites.length} / 4 FAVOURITE FILMS</p>
                 </div>
               </div>
-              <span className="profile-identity-index">{user ? 'THE LAST BUTTON / PERSONAL ARCHIVE' : 'LOCAL ARCHIVE / THIS BROWSER'}</span>
+              <span className="profile-identity-index">{user ? 'BUTTON / PERSONAL ARCHIVE' : 'LOCAL ARCHIVE / THIS BROWSER'}</span>
             </section>
             {profileError && <p className="inline-error" role="alert">{profileError}</p>}
             <CinemaArchive
