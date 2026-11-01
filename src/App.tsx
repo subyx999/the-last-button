@@ -14,6 +14,7 @@ import {
 import { parseLetterboxdDiary } from './services/letterboxd'
 import { useWatchlist } from './hooks/useWatchlist'
 import { useWatched } from './hooks/useWatched'
+import { useLikes } from './hooks/useLikes'
 import { useDailyStreak } from './hooks/useDailyStreak'
 import { useAuth } from './hooks/useAuth'
 import { isTasteProfileConfigured, profileImageUrl, useProfile } from './hooks/useProfile'
@@ -63,6 +64,11 @@ function utcDateKey(date = new Date()) {
 function millisecondsUntilNextUtcDay(date = new Date()) {
   const nextUtcDay = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1)
   return nextUtcDay - date.getTime() + 50
+}
+
+function millisecondsUntilNextLocalDay(date = new Date()) {
+  const nextLocalDay = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1)
+  return nextLocalDay.getTime() - date.getTime() + 50
 }
 
 function ErrorNotice({ message, onRetry, retryLabel = 'TRY AGAIN', disabled = false }: {
@@ -125,6 +131,7 @@ function RatingStars({ rating, onRate, label, disabled }: {
 
 function App() {
   const [screen, setScreen] = useState<Screen>('home')
+  const [localDate, setLocalDate] = useState(() => new Date())
   const [themePreference, setThemePreference] = useState<ThemePreference>(initialThemePreference)
   const [featured, setFeatured] = useState<Movie | null>(null)
   const [selected, setSelected] = useState<Movie | null>(null)
@@ -177,6 +184,15 @@ function App() {
   const archiveDetailHistory = useRef(false)
   const archiveViewingId = useRef<string | undefined>(undefined)
   const authSubmitInFlight = useRef(false)
+
+  useEffect(() => {
+    const timeout = window.setTimeout(
+      () => setLocalDate(new Date()),
+      millisecondsUntilNextLocalDay(localDate),
+    )
+    return () => window.clearTimeout(timeout)
+  }, [localDate])
+
   const {
     user,
     loading: authLoading,
@@ -202,6 +218,16 @@ function App() {
     removeWatched,
     retry: retryWatched,
   } = useWatched(user?.id)
+  const {
+    movies: likedMovies,
+    loading: likesLoading,
+    error: likesError,
+    contains: hasLiked,
+    setLiked,
+    toggle: toggleLike,
+    pendingMovieIds: pendingLikeIds,
+    retry: retryLikes,
+  } = useLikes(user?.id, watchedMovies, watchedLoading)
   const {
     current: dailyStreak,
     best: bestDailyStreak,
@@ -413,7 +439,7 @@ function App() {
       setAuthPasswordConfirmation('')
       setAuthMode('update-password')
       setAuthMessage('')
-      setScreen('auth')
+      setScreen('settings')
     }
   }, [passwordRecovery])
 
@@ -421,7 +447,7 @@ function App() {
     if (passwordRecoveryError) {
       setAuthMode('reset-password')
       setAuthMessage('')
-      setScreen('auth')
+      setScreen('settings')
     }
   }, [passwordRecoveryError])
 
@@ -846,6 +872,13 @@ function App() {
   ) ?? currentMovie?.videos?.results?.find(
     (video) => video.site === 'YouTube' && video.type === 'Teaser',
   )
+  const dateParts = new Intl.DateTimeFormat('en', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+  }).formatToParts(localDate)
+  const localDateLabel = `${dateParts.find((part) => part.type === 'day')?.value} ${dateParts.find((part) => part.type === 'month')?.value} ${dateParts.find((part) => part.type === 'year')?.value}`.toUpperCase()
+  const localWeekday = new Intl.DateTimeFormat('en', { weekday: 'long' }).format(localDate).toUpperCase()
 
   return (
     <main className="site-shell">
@@ -853,12 +886,10 @@ function App() {
         <button className="wordmark" onClick={returnHome} aria-label="The Last Button, home">
           <span className="wordmark-icon">◉</span> THE LAST BUTTON
         </button>
-        <div className="topbar-status" aria-live="polite">
-          {!tasteProfileReady
-            ? profileError ? 'TASTE PROFILE: UNAVAILABLE' : 'TASTE PROFILE: LOADING'
-            : tasteProfileConfigured
-              ? 'TASTE PROFILE: SET / FILTERING RANDOM PICKS'
-              : 'TASTE PROFILE: NOT SET / RANDOM PICKS UNFILTERED'}
+        <div className="topbar-status" aria-label={`Today's date: ${localDateLabel}, ${localWeekday}`}>
+          <span className="topbar-date-label">TODAY’S DATE</span>
+          <span className="topbar-date-main">{localDateLabel}</span>
+          <span className="topbar-date-weekday">{localWeekday}</span>
         </div>
         <div className="topbar-actions">
           <button className={`watchlist-link ${screen === 'discover' ? 'is-current' : ''}`} onClick={() => openDiscovery('search')}>
@@ -893,6 +924,7 @@ function App() {
       {sessionError && <ErrorNotice message={sessionError} />}
       {watchlistError && <ErrorNotice message={watchlistError} onRetry={retryWatchlist} disabled={watchlistLoading} />}
       {watchedError && <ErrorNotice message={watchedError} onRetry={retryWatched} disabled={watchedLoading} />}
+      {likesError && <ErrorNotice message={likesError} onRetry={retryLikes} disabled={likesLoading} />}
       {streakError && <ErrorNotice message={streakError} onRetry={() => { void retryStreak() }} disabled={streakLoading} />}
       {error && <ErrorNotice
         message={error}
@@ -1134,13 +1166,13 @@ function App() {
                     disabled={watchedLoading}
                   />
                   <button
-                    className={`watch-item-like${movie.user_liked ? ' is-liked' : ''}`}
+                    className={`watch-item-like${hasLiked(movie.id) ? ' is-liked' : ''}`}
                     type="button"
-                    aria-pressed={movie.user_liked ?? false}
-                    onClick={() => { void setWatchedRating(movie.id, movie.user_rating ?? null, movie.user_review, !movie.user_liked) }}
-                    disabled={watchedLoading}
+                    aria-pressed={hasLiked(movie.id)}
+                    onClick={() => { void toggleLike(movie) }}
+                    disabled={pendingLikeIds.has(movie.id)}
                   >
-                    {movie.user_liked ? '♥ LIKED' : '♡ LIKE'}
+                    {pendingLikeIds.has(movie.id) ? 'SAVING…' : hasLiked(movie.id) ? '♥ LIKED' : '♡ LIKE'}
                   </button>
                   {movie.user_rating !== null && movie.user_rating !== undefined && (
                     <span className="rating-value">{movie.user_rating} / 5</span>
@@ -1202,6 +1234,15 @@ function App() {
                     </button>
                   </>
                 )}
+                <button
+                  className={`button ${hasLiked(currentMovie.id) ? 'button-liked' : 'button-secondary'}`}
+                  type="button"
+                  aria-pressed={hasLiked(currentMovie.id)}
+                  disabled={pendingLikeIds.has(currentMovie.id)}
+                  onClick={() => { void toggleLike(currentMovie) }}
+                >
+                  {pendingLikeIds.has(currentMovie.id) ? 'SAVING…' : hasLiked(currentMovie.id) ? '♥ LIKED' : '♡ LIKE'}
+                </button>
               </div>
             </div>
             {currentMovie.poster_path && <img className="detail-poster" src={imageUrl(currentMovie.poster_path)} alt={`${currentMovie.title} poster`} decoding="async" />}
@@ -1234,7 +1275,7 @@ function App() {
       {(screen === 'auth' || screen === 'settings') && (
         <section className="secondary-screen profile-screen">
           <p className="eyebrow"><span className="red-mark">✳</span> {screen === 'settings' ? 'SETTINGS / ACCOUNT & PREFERENCES' : user ? 'YOUR PROFILE' : screen === 'auth' ? 'GUEST / PERSONAL ARCHIVE' : 'SIGN IN / CREATE ACCOUNT'}</p>
-          {screen === 'settings' && !passwordRecovery && (
+          {screen === 'settings' && !passwordRecovery && !passwordRecoveryError && (
             <div className="secondary-heading settings-page-heading">
               <h1>Settings,<br /><em>in order.</em></h1>
               <span>{user ? 'ACCOUNT CONTROL' : 'GUEST / THIS BROWSER'}</span>
@@ -1270,7 +1311,8 @@ function App() {
               watchlistCount={watchlistError ? '—' : watchlist.length}
               ratedCount={ratedMovies.length}
               averageRating={averageRating}
-              likedCount={watchedMovies.filter((movie) => movie.user_liked).length}
+              likedCount={likedMovies.length}
+              likedMovies={likedMovies}
               currentStreak={streakError ? '—' : dailyStreak}
               bestStreak={streakError ? '—' : bestDailyStreak}
               favorites={profile.favorites}
@@ -1282,6 +1324,8 @@ function App() {
               onOpenMovie={(movie) => { void openMovie(movie) }}
               onOpenWatchedMovie={(movie, viewingId) => { void openArchiveMovie(movie, viewingId) }}
               onOpenWatched={() => setScreen('watched')}
+              onToggleLike={(movie) => { void setLiked(movie, false) }}
+              likedMovieIdsPending={pendingLikeIds}
             />
             </>
           )}
@@ -1329,7 +1373,7 @@ function App() {
               </section>
             </>
           )}
-          {screen === 'settings' && (
+          {screen === 'settings' && user && !passwordRecovery && !passwordRecoveryError && (
             <section className="settings-account-section" aria-labelledby="account-details-title">
               <div className="settings-section-heading">
                 <span className="micro-label">ACCOUNT / SIGN-IN & ACCESS</span>
@@ -1367,9 +1411,13 @@ function App() {
               </div>
             </section>
           )}
-          {(passwordRecovery || passwordRecoveryError || (screen === 'auth' && !user)) && (passwordRecovery ? (
+          {(passwordRecovery || passwordRecoveryError || (screen === 'settings' && !user)) && (passwordRecovery ? (
             <>
-              <div className="secondary-heading"><h1>Settings,<br /><em>password.</em></h1><span>SECURE RESET</span></div>
+              <section className="settings-account-section" aria-labelledby="account-details-title">
+              <div className="settings-section-heading">
+                <span className="micro-label">ACCOUNT / SECURE RESET</span>
+                <h2 id="account-details-title">Reset your<br /><em>password.</em></h2>
+              </div>
               <div className="account-panel">
                 <p className="account-description">Choose a new password for your account.</p>
                 <form className="auth-form" onSubmit={(event) => { void submitAuth(event) }}>
@@ -1383,11 +1431,17 @@ function App() {
                   </button>
                 </form>
               </div>
+              </section>
             </>
           ) : (
             <>
-              <div className="secondary-heading settings-page-heading"><h1>{authMode === 'reset-password' ? <>Reset your<br /><em>password.</em></> : <>Sign in or<br /><em>join us.</em></>}</h1><span>GUEST MODE ALWAYS AVAILABLE</span></div>
+              <section className="settings-account-section" aria-labelledby="account-details-title">
+              <div className="settings-section-heading">
+                <span className="micro-label">ACCOUNT / SIGN-IN & ACCESS</span>
+                <h2 id="account-details-title">{authMode === 'reset-password' ? <>Reset your<br /><em>password.</em></> : <>Sign in or<br /><em>join us.</em></>}</h2>
+              </div>
               <div className="account-panel">
+                {!passwordRecoveryError && <p className="micro-label">GUEST MODE ALWAYS AVAILABLE</p>}
                 {passwordRecoveryError && <p className="inline-error" role="alert">{passwordRecoveryError}</p>}
                 <p className="account-description">
                   {authMode === 'reset-password'
@@ -1440,9 +1494,10 @@ function App() {
                   </button>
                 )}
               </div>
+              </section>
             </>
           ))}
-          {screen === 'settings' && !passwordRecovery && (
+          {screen === 'settings' && !passwordRecovery && !passwordRecoveryError && (
             <section className="diary-import-settings" aria-labelledby="diary-import-title">
               <div className="settings-section-heading">
                 <span className="micro-label">WATCHED FILMS / TRANSFER</span>

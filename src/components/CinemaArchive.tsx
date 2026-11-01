@@ -3,7 +3,7 @@ import type { Movie, MovieCollection, MovieViewing } from '../types'
 import { imageUrl, searchMovies } from '../services/tmdb'
 import { getMovieViewings } from '../services/watchHistory'
 
-export type ArchiveSection = 'overview' | 'watched' | 'diary' | 'reviews' | 'collections' | 'favourites'
+export type ArchiveSection = 'overview' | 'watched' | 'diary' | 'reviews' | 'collections' | 'favourites' | 'likes'
 type WatchedSort = 'recent' | 'oldest' | 'highest' | 'lowest'
 
 interface CinemaArchiveProps {
@@ -15,6 +15,7 @@ interface CinemaArchiveProps {
   currentStreak: number | string
   bestStreak: number | string
   favorites: Movie[]
+  likedMovies: Movie[]
   collections: MovieCollection[]
   section: ArchiveSection
   onSectionChange: (section: ArchiveSection) => void
@@ -23,6 +24,8 @@ interface CinemaArchiveProps {
   onOpenMovie: (movie: Movie) => void
   onOpenWatchedMovie: (movie: Movie, viewingId?: string) => void
   onOpenWatched: () => void
+  onToggleLike: (movie: Movie) => void
+  likedMovieIdsPending: Set<number>
 }
 
 function parsedDate(value?: string) {
@@ -37,7 +40,7 @@ const SECTIONS: Array<{ id: ArchiveSection; label: string }> = [
   { id: 'diary', label: 'DIARY' },
   { id: 'reviews', label: 'REVIEWS' },
   { id: 'collections', label: 'COLLECTIONS' },
-  { id: 'favourites', label: 'FAVOURITES' },
+  { id: 'likes', label: 'LIKES' },
 ]
 
 function yearOf(movie: Movie) {
@@ -73,6 +76,7 @@ export default function CinemaArchive({
   currentStreak,
   bestStreak,
   favorites,
+  likedMovies,
   collections,
   section,
   onSectionChange,
@@ -81,6 +85,8 @@ export default function CinemaArchive({
   onOpenMovie,
   onOpenWatchedMovie,
   onOpenWatched,
+  onToggleLike,
+  likedMovieIdsPending,
 }: CinemaArchiveProps) {
   const [sort, setSort] = useState<WatchedSort>('recent')
   const [diarySearch, setDiarySearch] = useState('')
@@ -276,7 +282,51 @@ export default function CinemaArchive({
 
       {section === 'overview' && (
         <div className="archive-overview">
-          <header className="archive-section-heading">
+          <div className="archive-overview-featured">
+            <div className="archive-overview-favourites">
+              <div className="profile-favorites-heading">
+                <div><span className="micro-label">FOUR FILMS THAT STAY</span><h2>The favourites.</h2></div>
+                <button className="text-button" type="button" onClick={() => onSectionChange('favourites')}>OPEN CANON ↗</button>
+              </div>
+              <div className="profile-favorites-grid">
+                {favorites.length ? favorites.map((movie) => (
+                  <button className="profile-favorite-film" type="button" key={movie.id} onClick={() => onOpenMovie(movie)}>
+                    {movie.poster_path ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" /> : <span className="profile-favorite-placeholder">NO<br />IMAGE</span>}
+                    <span className="profile-favorite-title">{movie.title}</span><span className="profile-favorite-year">{yearOf(movie)}</span>
+                  </button>
+                )) : <p className="profile-top-films-empty">Choose up to four favourite films in Settings → Make it yours.</p>}
+              </div>
+            </div>
+            <section className="profile-favorites profile-recent-films" aria-labelledby="profile-recent-title">
+              <div className="profile-favorites-heading">
+                <div>
+                  <span className="micro-label">FRESH FROM THE ARCHIVE</span>
+                  <h2 id="profile-recent-title">Recently watched.</h2>
+                </div>
+                <button className="text-button" type="button" onClick={onOpenWatched} disabled={!watchedMovies.length}>OPEN WATCHED ↗</button>
+              </div>
+              {watchedMovies.length ? (
+                <div className="profile-favorites-grid">
+                  {watchedMovies.slice(0, 4).map((movie) => (
+                    <button className="profile-favorite-film" type="button" key={movie.id} onClick={() => onOpenWatchedMovie(movie)}>
+                      {movie.poster_path
+                        ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
+                        : <span className="profile-favorite-placeholder">NO<br />IMAGE</span>}
+                      <span className="profile-favorite-title">{movie.title}</span>
+                      <span className="profile-favorite-year">{yearOf(movie)}</span>
+                      {movie.user_rating !== null && movie.user_rating !== undefined && (
+                        <span className="profile-favorite-year">{movie.user_rating} / 5 ★</span>
+                      )}
+                      {getMovieViewings(movie).length > 1 && <span className="profile-favorite-rewatch">↻ REWATCH</span>}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="profile-top-films-empty">Films you mark as watched will appear here.</p>
+              )}
+            </section>
+          </div>
+          <header className="archive-section-heading archive-overview-print-heading">
             <span className="micro-label">A RECORD OF YOUR TASTE</span>
             <h2>Your film<br /><em>print.</em></h2>
           </header>
@@ -313,48 +363,6 @@ export default function CinemaArchive({
                   ) : <p className="profile-top-films-empty">{watchedMovies.length ? 'Rate a watched film to start your personal top three.' : 'Mark films watched to build your film print.'}</p>}
                 </section>
               </div>
-              <div className="archive-overview-favourites">
-                <div className="profile-favorites-heading">
-                  <div><span className="micro-label">FOUR FILMS THAT STAY</span><h2>The favourites.</h2></div>
-                  <button className="text-button" type="button" onClick={() => onSectionChange('favourites')}>OPEN CANON ↗</button>
-                </div>
-                <div className="profile-favorites-grid">
-                  {favorites.length ? favorites.map((movie) => (
-                    <button className="profile-favorite-film" type="button" key={movie.id} onClick={() => onOpenMovie(movie)}>
-                      {movie.poster_path ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" /> : <span className="profile-favorite-placeholder">NO<br />IMAGE</span>}
-                      <span className="profile-favorite-title">{movie.title}</span><span className="profile-favorite-year">{yearOf(movie)}</span>
-                    </button>
-                  )) : <p className="profile-top-films-empty">Choose up to four favourite films in Settings → Make it yours.</p>}
-                </div>
-              </div>
-              <section className="profile-favorites profile-recent-films" aria-labelledby="profile-recent-title">
-                <div className="profile-favorites-heading">
-                  <div>
-                    <span className="micro-label">FRESH FROM THE ARCHIVE</span>
-                    <h2 id="profile-recent-title">Recently watched.</h2>
-                  </div>
-                  <button className="text-button" type="button" onClick={onOpenWatched} disabled={!watchedMovies.length}>OPEN WATCHED ↗</button>
-                </div>
-                {watchedMovies.length ? (
-                  <div className="profile-favorites-grid">
-                    {watchedMovies.slice(0, 4).map((movie) => (
-                      <button className="profile-favorite-film" type="button" key={movie.id} onClick={() => onOpenWatchedMovie(movie)}>
-                        {movie.poster_path
-                          ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
-                          : <span className="profile-favorite-placeholder">NO<br />IMAGE</span>}
-                        <span className="profile-favorite-title">{movie.title}</span>
-                        <span className="profile-favorite-year">{yearOf(movie)}</span>
-                        {movie.user_rating !== null && movie.user_rating !== undefined && (
-                          <span className="profile-favorite-year">{movie.user_rating} / 5 ★</span>
-                        )}
-                        {getMovieViewings(movie).length > 1 && <span className="profile-favorite-rewatch">↻ REWATCH</span>}
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="profile-top-films-empty">Films you mark as watched will appear here.</p>
-                )}
-              </section>
             </>
           )}
         </div>
@@ -596,6 +604,43 @@ export default function CinemaArchive({
               ))}
             </div>
           ) : <p className="archive-empty">Choose up to four favourites in Settings → Make it yours.</p>}
+        </section>
+      )}
+
+      {section === 'likes' && (
+        <section className="archive-film-section archive-likes" aria-labelledby="archive-likes-title">
+          <header className="archive-section-heading">
+            <div><span className="micro-label">THE FILMS THAT STAY WITH YOU / {likedMovies.length} LIKED</span><h2 id="archive-likes-title">The films<br /><em>you love.</em></h2></div>
+          </header>
+          {loading ? <p className="profile-film-print-loading" role="status">OPENING YOUR LIKES…</p> : likedMovies.length ? (
+            <div className="archive-likes-list">
+              {likedMovies.map((movie, index) => (
+                <article className="archive-like-entry" key={movie.id}>
+                  {poster(movie, onOpenMovie, 'archive-like-poster')}
+                  <div className="archive-like-copy">
+                    <span className="archive-film-index">{String(index + 1).padStart(3, '0')} / LIKED FILM</span>
+                    <button className="archive-like-title" type="button" onClick={() => onOpenMovie(movie)}>{movie.title}</button>
+                    <p className="archive-like-meta">{yearOf(movie)}{movie.genres?.length ? ` · ${movie.genres.slice(0, 2).map((genre) => genre.name).join(' / ')}` : ''}{movie.vote_average ? ` · ${movie.vote_average.toFixed(1)} / 10` : ''}</p>
+                    {movie.overview && <p className="archive-like-overview">{movie.overview}</p>}
+                    <button
+                      className="archive-like-remove"
+                      type="button"
+                      aria-label={`Unlike ${movie.title}`}
+                      disabled={likedMovieIdsPending.has(movie.id)}
+                      onClick={() => onToggleLike(movie)}
+                    >
+                      {likedMovieIdsPending.has(movie.id) ? 'SAVING…' : '♥  REMOVE FROM LIKES'}
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="archive-likes-empty">
+              <span className="micro-label">NO FILMS IN THIS FILE YET</span>
+              <p>When a film stays with you, mark it with a heart. It will be kept here, whether or not you’ve watched it.</p>
+            </div>
+          )}
         </section>
       )}
     </section>
