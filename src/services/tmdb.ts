@@ -110,6 +110,181 @@ export async function getMovieGenres(): Promise<MovieGenre[]> {
   return (result.genres ?? []).filter((genre) => genre.id && genre.name)
 }
 
+type DiscoveryCandidate = Movie & {
+  genre_ids?: number[]
+  vote_count?: number
+}
+
+type DiscoveryLane = {
+  name: string
+  country?: string
+  movies: DiscoveryCandidate[]
+}
+
+const DISCOVERY_PAGE_SIZE = 12
+const DISCOVERY_COUNTRIES = [
+  'JP', 'KR', 'IN', 'FR', 'IT', 'ES', 'DE', 'BR', 'MX', 'IR',
+  'EG', 'TR', 'NG', 'TH', 'ID', 'PH', 'SE',
+]
+const DISCOVERY_ERAS = [
+  { start: '1920-01-01', end: '1939-12-31' },
+  { start: '1940-01-01', end: '1949-12-31' },
+  { start: '1950-01-01', end: '1959-12-31' },
+]
+
+function discoveryPage(page: number, values: Record<string, string>) {
+  const params = new URLSearchParams({
+    include_adult: 'false',
+    page: String(page),
+    'primary_release_date.lte': currentDateString(),
+    ...values,
+  })
+  return request<{ results?: DiscoveryCandidate[] }>(`/discover/movie?${params.toString()}`)
+}
+
+function selectDiverseRecommendations(lanes: DiscoveryLane[], excludedIds: ReadonlySet<number>) {
+  const candidates = new Map<number, { movie: DiscoveryCandidate; lane: string; country?: string }>()
+  for (const lane of lanes) {
+    for (const movie of lane.movies) {
+      if (
+        !movie.id
+        || !movie.title
+        || excludedIds.has(movie.id)
+        || !isReleasedMovie(movie)
+        || (movie.vote_average ?? 0) < 5.8
+        || (movie.vote_count ?? 0) < 5
+        || candidates.has(movie.id)
+      ) continue
+      candidates.set(movie.id, { movie, lane: lane.name, country: lane.country })
+    }
+  }
+
+  const selected: Movie[] = []
+  const genreCounts = new Map<number, number>()
+  const decadeCounts = new Map<number, number>()
+  const languageCounts = new Map<string, number>()
+  const laneCounts = new Map<string, number>()
+  const countryCounts = new Map<string, number>()
+  let lowVoteSelectionCount = 0
+
+  while (selected.length < DISCOVERY_PAGE_SIZE && candidates.size) {
+    let bestId: number | undefined
+    let bestScore = Number.NEGATIVE_INFINITY
+
+    for (const [id, candidate] of candidates) {
+      const { movie, lane, country } = candidate
+      const genres = movie.genre_ids ?? []
+      const genreCount = genres.length
+        ? Math.max(...genres.map((genre) => genreCounts.get(genre) ?? 0))
+        : 0
+      const year = Number(movie.release_date?.slice(0, 4))
+      const decade = Math.floor(year / 10) * 10
+      const language = movie.original_language ?? 'unknown'
+      const voteCount = movie.vote_count ?? 0
+      if (
+        genreCount >= 3
+        || (decadeCounts.get(decade) ?? 0) >= 4
+        || (languageCounts.get(language) ?? 0) >= 3
+        || (laneCounts.get(lane) ?? 0) >= 4
+        || (country && (countryCounts.get(country) ?? 0) >= 2)
+        || (voteCount < 50 && lowVoteSelectionCount >= 5)
+      ) continue
+
+      const voteConfidence = Math.min(1, Math.log10(voteCount + 1) / 4)
+      const adjustedRating = (
+        (movie.vote_average ?? 0) * voteCount + 6.5 * 80
+      ) / (voteCount + 80)
+      const ratingQuality = Math.max(0, Math.min(1, (adjustedRating - 5.8) / 4.2))
+      const score = ratingQuality * 0.5
+        + voteConfidence * 0.1
+        + 0.14 / (1 + genreCount)
+        + 0.12 / (1 + (decadeCounts.get(decade) ?? 0))
+        + 0.12 / (1 + (languageCounts.get(language) ?? 0))
+        + 0.12 / (1 + (laneCounts.get(lane) ?? 0))
+        + (country ? 0.08 / (1 + (countryCounts.get(country) ?? 0)) : 0)
+        + Math.random() * 0.015
+
+      if (score > bestScore) {
+        bestId = id
+        bestScore = score
+      }
+    }
+
+    if (bestId === undefined) break
+    const candidate = candidates.get(bestId)!
+    candidates.delete(bestId)
+    selected.push(candidate.movie)
+    if ((candidate.movie.vote_count ?? 0) < 50) lowVoteSelectionCount += 1
+
+    for (const genre of candidate.movie.genre_ids ?? []) {
+      genreCounts.set(genre, (genreCounts.get(genre) ?? 0) + 1)
+    }
+    const year = Number(candidate.movie.release_date?.slice(0, 4))
+    const decade = Math.floor(year / 10) * 10
+    decadeCounts.set(decade, (decadeCounts.get(decade) ?? 0) + 1)
+    const language = candidate.movie.original_language ?? 'unknown'
+    languageCounts.set(language, (languageCounts.get(language) ?? 0) + 1)
+    laneCounts.set(candidate.lane, (laneCounts.get(candidate.lane) ?? 0) + 1)
+    if (candidate.country) {
+      countryCounts.set(candidate.country, (countryCounts.get(candidate.country) ?? 0) + 1)
+    }
+  }
+
+  return selected
+}
+
+export async function getDiscoveryRecommendations(
+  seed: number,
+  batch: number,
+  excludedIds: ReadonlySet<number> = new Set(),
+): Promise<Movie[]> {
+  const era = DISCOVERY_ERAS[(seed + batch) % DISCOVERY_ERAS.length]
+  const country = DISCOVERY_COUNTRIES[(seed + batch) % DISCOVERY_COUNTRIES.length]
+  const pages = [
+    ((seed + batch * 3) % 100) + 1,
+    (batch % 5) + 1,
+    (batch % 3) + 1,
+    (batch % 3) + 1,
+  ]
+  const queryResults = await Promise.all([
+    discoveryPage(pages[0], {
+      sort_by: 'popularity.desc',
+      'vote_average.gte': '5.8',
+      'vote_count.gte': '25',
+    }),
+    discoveryPage(pages[1], {
+      sort_by: 'vote_average.desc',
+      'vote_average.gte': '6.3',
+      'vote_count.gte': '10',
+      'vote_count.lte': '1200',
+    }),
+    discoveryPage(pages[2], {
+      sort_by: 'vote_average.desc',
+      'vote_average.gte': '6.2',
+      'vote_count.gte': '10',
+      'primary_release_date.gte': era.start,
+      'primary_release_date.lte': era.end,
+    }),
+    discoveryPage(pages[3], {
+      sort_by: 'vote_average.desc',
+      'vote_average.gte': '6.2',
+      'vote_count.gte': '10',
+      with_origin_country: country,
+    }),
+  ])
+  const lanes: DiscoveryLane[] = [
+    { name: 'international', country, movies: queryResults[3].results ?? [] },
+    { name: 'classics', movies: queryResults[2].results ?? [] },
+    { name: 'underseen', movies: queryResults[1].results ?? [] },
+    { name: 'mainstream', movies: queryResults[0].results ?? [] },
+  ]
+  const recommendations = selectDiverseRecommendations(lanes, excludedIds)
+  if (!recommendations.length) {
+    throw new Error('TMDB could not find more quality films for this discovery feed. Please try again.')
+  }
+  return recommendations
+}
+
 export async function discoverMoviesByGenre(genreIds: readonly number[]): Promise<Movie[]> {
   const selectedGenres = [...new Set(genreIds.filter((genreId) => Number.isInteger(genreId) && genreId > 0))]
   if (!selectedGenres.length) return []

@@ -444,6 +444,9 @@ h1, h2, p { margin-top: 0; }
 .settings-page-heading { max-width: 940px; margin-bottom: 36px; }
 .profile-section-label { max-width: 940px; margin: 0 0 -20px; color: var(--red); font: 9px var(--mono); letter-spacing: .09em; }
 .settings-profile-controls, .settings-account-section, .diary-import-settings { max-width: 940px; margin: 0 0 38px; }
+.secondary-screen.settings-screen > *,
+.secondary-screen.profile-screen > * { max-width: 940px; margin-left: auto; margin-right: auto; }
+.secondary-screen.settings-screen > .back-link { display: block; width: 100%; }
 .settings-section-heading { display: grid; align-content: end; gap: 9px; margin: 0 0 18px; padding: 20px 0 15px; border-bottom: 1px solid rgba(var(--border-rgb),.22); }
 .settings-section-heading h2 { margin: 0; font-size: clamp(36px, 6vw, 64px); line-height: .86; letter-spacing: -.085em; }
 .settings-section-heading h2 em { font-family: Georgia, serif; font-weight: 400; }

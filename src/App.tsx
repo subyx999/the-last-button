@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import {
   discoverMoviesByGenre,
   findExactMovie,
+  getDiscoveryRecommendations,
   getMovie,
   getMovieGenres,
   getMovieOfTheDay,
@@ -177,6 +178,12 @@ function App() {
   const [genreResultsBusy, setGenreResultsBusy] = useState(false)
   const [genreResultsError, setGenreResultsError] = useState('')
   const [genreResultsRetry, setGenreResultsRetry] = useState(0)
+  const [discoveryRecommendations, setDiscoveryRecommendations] = useState<Movie[]>([])
+  const [recommendationsBusy, setRecommendationsBusy] = useState(false)
+  const [recommendationsError, setRecommendationsError] = useState('')
+  const [recommendationsRetry, setRecommendationsRetry] = useState(0)
+  const [recommendationsSeed, setRecommendationsSeed] = useState(() => Math.floor(Math.random() * 500) + 1)
+  const [recommendationsBatch, setRecommendationsBatch] = useState(0)
   const [utcDate, setUtcDate] = useState(() => utcDateKey())
   const randomMovieIds = useRef(new Set<number>())
   const retryTarget = useRef<RetryTarget>(null)
@@ -393,6 +400,31 @@ function App() {
     })
     return () => { active = false }
   }, [discoverMode, genreResultsRetry, screen, selectedGenreIds])
+
+  useEffect(() => {
+    if (
+      screen !== 'discover'
+      || discoverMode !== 'search'
+      || movieSearch.trim()
+      || discoveryRecommendations.length
+    ) return
+
+    let active = true
+    setRecommendationsBusy(true)
+    setRecommendationsError('')
+    getDiscoveryRecommendations(recommendationsSeed, 0).then((movies) => {
+      if (active) {
+        setDiscoveryRecommendations(movies)
+        setRecommendationsBatch(1)
+      }
+    }).catch((cause: unknown) => {
+      if (active) setRecommendationsError(cause instanceof Error ? cause.message : 'Could not load movie recommendations.')
+    }).finally(() => {
+      if (active) setRecommendationsBusy(false)
+    })
+
+    return () => { active = false }
+  }, [discoverMode, discoveryRecommendations.length, movieSearch, recommendationsRetry, recommendationsSeed, screen])
 
   useEffect(() => {
     const checkForUtcDateChange = () => {
@@ -843,8 +875,37 @@ function App() {
 
   function openDiscovery(mode: DiscoverMode) {
     setDiscoverMode(mode)
+    setMovieSearch('')
+    setDiscoveryRecommendations([])
+    setRecommendationsBusy(false)
+    setRecommendationsError('')
+    setRecommendationsBatch(0)
+    setRecommendationsSeed((current) => {
+      const next = Math.floor(Math.random() * 500) + 1
+      return next === current ? (next % 500) + 1 : next
+    })
     setScreen('discover')
     setError('')
+  }
+
+  async function loadMoreRecommendations() {
+    if (recommendationsBusy) return
+
+    setRecommendationsBusy(true)
+    setRecommendationsError('')
+    try {
+      const excludedIds = new Set(discoveryRecommendations.map((movie) => movie.id))
+      const movies = await getDiscoveryRecommendations(recommendationsSeed, recommendationsBatch, excludedIds)
+      setDiscoveryRecommendations((current) => [
+        ...current,
+        ...movies.filter((movie) => !current.some((existing) => existing.id === movie.id)),
+      ])
+      setRecommendationsBatch((current) => current + 1)
+    } catch (cause) {
+      setRecommendationsError(cause instanceof Error ? cause.message : 'Could not load more movie recommendations.')
+    } finally {
+      setRecommendationsBusy(false)
+    }
   }
 
   function toggleGenre(genreId: number) {
@@ -1026,37 +1087,82 @@ function App() {
                     />
                     <span className="discovery-search-mark" aria-hidden="true">↳</span>
                   </div>
-                  {searchError && <ErrorNotice message={searchError} onRetry={() => setSearchRetry((count) => count + 1)} disabled={searchBusy} />}
-                  {searchBusy ? <p className="discovery-status" role="status"><span className="discovery-status-mark" aria-hidden="true">◌</span> ASKING THE ARCHIVE…</p> : searchResults.length ? (
+                  {movieSearch.trim() ? (
                     <>
-                      <div className="discovery-results-heading">
-                        <span>RETURN / “{movieSearch.trim()}”</span>
-                        <span>{String(searchResults.length).padStart(2, '0')} FRAGMENTS</span>
-                      </div>
-                      <div className="discovery-results" aria-label="Movie search results">
-                        {searchResults.map((movie, index) => {
-                          const released = isReleasedMovie(movie)
-                          const releaseLabel = released ? yearOf(movie) : movie.release_date ? 'UPCOMING' : 'RELEASE DATE UNKNOWN'
-                          return (
-                            <button className="discovery-card" key={movie.id} onClick={() => { void openMovie(movie) }} aria-label={`Open ${movie.title}, ${released ? yearOf(movie) : releaseLabel}`}>
-                              <span className="discovery-card-index" aria-hidden="true">{String(index + 1).padStart(3, '0')} / FILM</span>
-                              {movie.poster_path
-                                ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
-                                : <span className="discovery-poster-placeholder">NO<br />IMAGE<br />ON FILE</span>}
-                              <span className="discovery-card-title">{movie.title}</span>
-                              <span className="discovery-card-meta-row">
-                                <span className={`discovery-card-meta${released ? '' : ' is-upcoming'}`}>{releaseLabel}</span>
-                                <span className="discovery-card-rating">{movie.vote_average && movie.vote_average > 0 ? `${movie.vote_average.toFixed(1)} / 10` : 'UNRATED'}</span>
-                              </span>
-                            </button>
-                          )
-                        })}
-                      </div>
+                      {searchError && <ErrorNotice message={searchError} onRetry={() => setSearchRetry((count) => count + 1)} disabled={searchBusy} />}
+                      {searchBusy ? <p className="discovery-status" role="status"><span className="discovery-status-mark" aria-hidden="true">◌</span> ASKING THE ARCHIVE…</p> : searchResults.length ? (
+                        <>
+                          <div className="discovery-results-heading">
+                            <span>RETURN / “{movieSearch.trim()}”</span>
+                            <span>{String(searchResults.length).padStart(2, '0')} FRAGMENTS</span>
+                          </div>
+                          <div className="discovery-results" aria-label="Movie search results">
+                            {searchResults.map((movie, index) => {
+                              const released = isReleasedMovie(movie)
+                              const releaseLabel = released ? yearOf(movie) : movie.release_date ? 'UPCOMING' : 'RELEASE DATE UNKNOWN'
+                              return (
+                                <button className="discovery-card" key={movie.id} onClick={() => { void openMovie(movie) }} aria-label={`Open ${movie.title}, ${released ? yearOf(movie) : releaseLabel}`}>
+                                  <span className="discovery-card-index" aria-hidden="true">{String(index + 1).padStart(3, '0')} / FILM</span>
+                                  {movie.poster_path
+                                    ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
+                                    : <span className="discovery-poster-placeholder">NO<br />IMAGE<br />ON FILE</span>}
+                                  <span className="discovery-card-title">{movie.title}</span>
+                                  <span className="discovery-card-meta-row">
+                                    <span className={`discovery-card-meta${released ? '' : ' is-upcoming'}`}>{releaseLabel}</span>
+                                    <span className="discovery-card-rating">{movie.vote_average && movie.vote_average > 0 ? `${movie.vote_average.toFixed(1)} / 10` : 'UNRATED'}</span>
+                                  </span>
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </>
+                      ) : searchError ? null : (
+                        <p className="discovery-status" role="status">NO SIGNAL FOUND FOR THAT TITLE.</p>
+                      )}
                     </>
-                  ) : searchError ? null : movieSearch.trim() ? (
-                    <p className="discovery-status" role="status">NO SIGNAL FOUND FOR THAT TITLE.</p>
                   ) : (
-                    <p className="discovery-status">BEGIN WITH A TITLE — INCLUDING A SINGLE LETTER.</p>
+                    <>
+                      {recommendationsError && (
+                        <ErrorNotice
+                          message={recommendationsError}
+                          onRetry={() => {
+                            if (discoveryRecommendations.length) void loadMoreRecommendations()
+                            else setRecommendationsRetry((count) => count + 1)
+                          }}
+                          disabled={recommendationsBusy}
+                        />
+                      )}
+                      {recommendationsBusy && !discoveryRecommendations.length ? (
+                        <p className="discovery-status" role="status"><span className="discovery-status-mark" aria-hidden="true">◌</span> FINDING YOUR NEXT FILM…</p>
+                      ) : discoveryRecommendations.length ? (
+                        <>
+                          <div className="discovery-results-heading">
+                            <span>OPEN SIGNALS / FILMS TO FIND</span>
+                            <span>{String(discoveryRecommendations.length).padStart(2, '0')} FRAGMENTS</span>
+                          </div>
+                          <div className="discovery-results" aria-label="Recommended movies">
+                            {discoveryRecommendations.map((movie, index) => (
+                              <button className="discovery-card" key={movie.id} onClick={() => { void openMovie(movie) }} aria-label={`Open ${movie.title}, ${yearOf(movie)}`}>
+                                <span className="discovery-card-index" aria-hidden="true">{String(index + 1).padStart(3, '0')} / FILM</span>
+                                {movie.poster_path
+                                  ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" decoding="async" />
+                                  : <span className="discovery-poster-placeholder">NO<br />IMAGE<br />ON FILE</span>}
+                                <span className="discovery-card-title">{movie.title}</span>
+                                <span className="discovery-card-meta-row">
+                                  <span className="discovery-card-meta">{yearOf(movie)}</span>
+                                  <span className="discovery-card-rating">{movie.vote_average && movie.vote_average > 0 ? `${movie.vote_average.toFixed(1)} / 10` : 'UNRATED'}</span>
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                          <button className="button button-secondary" type="button" onClick={() => { void loadMoreRecommendations() }} disabled={recommendationsBusy}>
+                            {recommendationsBusy ? 'FINDING MORE FILMS…' : 'SHOW MORE FILMS'} <span aria-hidden="true">↗</span>
+                          </button>
+                        </>
+                      ) : recommendationsError ? null : (
+                        <p className="discovery-status" role="status"><span className="discovery-status-mark" aria-hidden="true">◌</span> FINDING YOUR NEXT FILM…</p>
+                      )}
+                    </>
                   )}
                 </>
               ) : (
@@ -1273,7 +1379,7 @@ function App() {
       )}
 
       {(screen === 'auth' || screen === 'settings') && (
-        <section className="secondary-screen profile-screen">
+        <section className={`secondary-screen ${screen === 'settings' ? 'settings-screen' : 'profile-screen'}`}>
           <p className="eyebrow"><span className="red-mark">✳</span> {screen === 'settings' ? 'SETTINGS / ACCOUNT & PREFERENCES' : user ? 'YOUR PROFILE' : screen === 'auth' ? 'GUEST / PERSONAL ARCHIVE' : 'SIGN IN / CREATE ACCOUNT'}</p>
           {screen === 'settings' && !passwordRecovery && !passwordRecoveryError && (
             <div className="secondary-heading settings-page-heading">
