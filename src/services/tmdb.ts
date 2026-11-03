@@ -2,7 +2,6 @@ import type { Movie, TasteProfile } from '../types'
 
 const API_ROOT = 'https://api.themoviedb.org/3'
 const API_KEY = import.meta.env.VITE_TMDB_API_KEY
-const DAILY_MOVIE_IDS = [11, 13, 28, 155, 238, 278, 424, 597, 603, 680, 550, 27205, 157336, 496243]
 const RESPONSE_CACHE_TTL_MS = 5 * 60 * 1000
 const RESPONSE_CACHE_LIMIT = 80
 const responseCache = new Map<string, { value: unknown; expiresAt: number }>()
@@ -142,7 +141,11 @@ function discoveryPage(page: number, values: Record<string, string>) {
   return request<{ results?: DiscoveryCandidate[] }>(`/discover/movie?${params.toString()}`)
 }
 
-function selectDiverseRecommendations(lanes: DiscoveryLane[], excludedIds: ReadonlySet<number>) {
+function selectDiverseRecommendations(
+  lanes: DiscoveryLane[],
+  excludedIds: ReadonlySet<number>,
+  tieSeed?: number,
+) {
   const candidates = new Map<number, { movie: DiscoveryCandidate; lane: string; country?: string }>()
   for (const lane of lanes) {
     for (const movie of lane.movies) {
@@ -195,6 +198,9 @@ function selectDiverseRecommendations(lanes: DiscoveryLane[], excludedIds: Reado
         (movie.vote_average ?? 0) * voteCount + 6.5 * 80
       ) / (voteCount + 80)
       const ratingQuality = Math.max(0, Math.min(1, (adjustedRating - 5.8) / 4.2))
+      const tieBreak = tieSeed === undefined
+        ? Math.random() * 0.015
+        : (((id * 31 + tieSeed * 17) % 1009) / 1009) * 0.015
       const score = ratingQuality * 0.5
         + voteConfidence * 0.1
         + 0.14 / (1 + genreCount)
@@ -202,7 +208,7 @@ function selectDiverseRecommendations(lanes: DiscoveryLane[], excludedIds: Reado
         + 0.12 / (1 + (languageCounts.get(language) ?? 0))
         + 0.12 / (1 + (laneCounts.get(lane) ?? 0))
         + (country ? 0.08 / (1 + (countryCounts.get(country) ?? 0)) : 0)
-        + Math.random() * 0.015
+        + tieBreak
 
       if (score > bestScore) {
         bestId = id
@@ -237,6 +243,7 @@ export async function getDiscoveryRecommendations(
   seed: number,
   batch: number,
   excludedIds: ReadonlySet<number> = new Set(),
+  deterministicSeed?: number,
 ): Promise<Movie[]> {
   const era = DISCOVERY_ERAS[(seed + batch) % DISCOVERY_ERAS.length]
   const country = DISCOVERY_COUNTRIES[(seed + batch) % DISCOVERY_COUNTRIES.length]
@@ -278,7 +285,7 @@ export async function getDiscoveryRecommendations(
     { name: 'underseen', movies: queryResults[1].results ?? [] },
     { name: 'mainstream', movies: queryResults[0].results ?? [] },
   ]
-  const recommendations = selectDiverseRecommendations(lanes, excludedIds)
+  const recommendations = selectDiverseRecommendations(lanes, excludedIds, deterministicSeed)
   if (!recommendations.length) {
     throw new Error('TMDB could not find more quality films for this discovery feed. Please try again.')
   }
@@ -304,8 +311,9 @@ export async function discoverMoviesByGenre(genreIds: readonly number[]): Promis
 
 export async function getMovieOfTheDay(date = new Date()): Promise<Movie> {
   const day = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) / 86_400_000
-  const id = DAILY_MOVIE_IDS[((day % DAILY_MOVIE_IDS.length) + DAILY_MOVIE_IDS.length) % DAILY_MOVIE_IDS.length]
-  const movie = await getMovie(id)
+  const recommendations = await getDiscoveryRecommendations(day, 0, new Set(), day)
+  const index = ((day * 7 + 3) % recommendations.length + recommendations.length) % recommendations.length
+  const movie = await getMovie(recommendations[index].id)
   if (!isReleasedMovie(movie, currentDateString(date))) {
     throw new Error('Today’s movie does not have a valid past release date. Please try again later.')
   }
