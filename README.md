@@ -8,7 +8,7 @@ Button. is an experimental film-discovery project with an editorial cinema ident
 
 ## What you can do
 
-- Get a **Movie of the Day**. The UTC date seeds TMDB discovery searches spanning mainstream, underseen, classic-era, and international films; the same deterministic choice from those results is featured for everyone on that date.
+- Get a **Movie of the Day**. The UTC date rotates the pick through TMDB's international, underseen, classic-era, and mainstream discovery lanes, then deterministically selects a film from that day's results.
 - Find **random films**; saved watched films, today's pick, and films already shown during the visit are excluded.
 - **Search** for films and browse recommendations by genre.
 - Keep separate **Watchlist**, **Watched**, and **Likes** collections. Add half-star ratings and optional reviews to watched films.

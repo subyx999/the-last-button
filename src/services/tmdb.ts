@@ -120,7 +120,10 @@ type DiscoveryLane = {
   movies: DiscoveryCandidate[]
 }
 
+type DiscoveryLaneName = 'international' | 'classics' | 'underseen' | 'mainstream'
+
 const DISCOVERY_PAGE_SIZE = 12
+const DAILY_DISCOVERY_LANES: DiscoveryLaneName[] = ['international', 'underseen', 'classics', 'mainstream']
 const DISCOVERY_COUNTRIES = [
   'JP', 'KR', 'IN', 'FR', 'IT', 'ES', 'DE', 'BR', 'MX', 'IR',
   'EG', 'TR', 'NG', 'TH', 'ID', 'PH', 'SE',
@@ -239,11 +242,31 @@ function selectDiverseRecommendations(
   return selected
 }
 
+function selectLaneRecommendation(
+  lanes: DiscoveryLane[],
+  laneName: DiscoveryLaneName,
+  excludedIds: ReadonlySet<number>,
+  seed: number,
+) {
+  const candidates = lanes.find((lane) => lane.name === laneName)?.movies.filter(
+    (movie) => movie.id
+      && movie.title
+      && !excludedIds.has(movie.id)
+      && isReleasedMovie(movie)
+      && (movie.vote_average ?? 0) >= 5.8
+      && (movie.vote_count ?? 0) >= 5,
+  ) ?? []
+  if (!candidates.length) return []
+  const index = ((seed % candidates.length) + candidates.length) % candidates.length
+  return [candidates[index]]
+}
+
 export async function getDiscoveryRecommendations(
   seed: number,
   batch: number,
   excludedIds: ReadonlySet<number> = new Set(),
   deterministicSeed?: number,
+  preferredLane?: DiscoveryLaneName,
 ): Promise<Movie[]> {
   const era = DISCOVERY_ERAS[(seed + batch) % DISCOVERY_ERAS.length]
   const country = DISCOVERY_COUNTRIES[(seed + batch) % DISCOVERY_COUNTRIES.length]
@@ -285,7 +308,12 @@ export async function getDiscoveryRecommendations(
     { name: 'underseen', movies: queryResults[1].results ?? [] },
     { name: 'mainstream', movies: queryResults[0].results ?? [] },
   ]
-  const recommendations = selectDiverseRecommendations(lanes, excludedIds, deterministicSeed)
+  const recommendations = preferredLane
+    ? selectLaneRecommendation(lanes, preferredLane, excludedIds, deterministicSeed ?? seed)
+    : selectDiverseRecommendations(lanes, excludedIds, deterministicSeed)
+  if (!recommendations.length && preferredLane) {
+    recommendations.push(...selectDiverseRecommendations(lanes, excludedIds, deterministicSeed))
+  }
   if (!recommendations.length) {
     throw new Error('TMDB could not find more quality films for this discovery feed. Please try again.')
   }
@@ -311,9 +339,10 @@ export async function discoverMoviesByGenre(genreIds: readonly number[]): Promis
 
 export async function getMovieOfTheDay(date = new Date()): Promise<Movie> {
   const day = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) / 86_400_000
-  const recommendations = await getDiscoveryRecommendations(day, 0, new Set(), day)
-  const index = ((day * 7 + 3) % recommendations.length + recommendations.length) % recommendations.length
-  const movie = await getMovie(recommendations[index].id)
+  const laneIndex = ((day % DAILY_DISCOVERY_LANES.length) + DAILY_DISCOVERY_LANES.length) % DAILY_DISCOVERY_LANES.length
+  const lane = DAILY_DISCOVERY_LANES[laneIndex]
+  const [recommendation] = await getDiscoveryRecommendations(day, day, new Set(), day, lane)
+  const movie = await getMovie(recommendation.id)
   if (!isReleasedMovie(movie, currentDateString(date))) {
     throw new Error('Today’s movie does not have a valid past release date. Please try again later.')
   }
