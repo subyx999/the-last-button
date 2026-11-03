@@ -211,7 +211,7 @@ function App() {
     clearError: clearSessionError,
     setError: setSessionError,
   } = useAuth()
-  const { profile, loading: profileLoading, error: profileError, saveCollections, saveFavorites, saveTasteProfile, saveUsername, updateImage } = useProfile(user?.id)
+  const { profile, loading: profileLoading, error: profileError, loadError: profileLoadError, saveCollections, saveFavorites, saveTasteProfile, saveUsername, updateImage } = useProfile(user?.id)
   const { movies: watchlist, contains, toggle, loading: watchlistLoading, error: watchlistError, retry: retryWatchlist } = useWatchlist(user?.id)
   const {
     movies: watchedMovies,
@@ -1426,6 +1426,8 @@ function App() {
               section={archiveSection}
               onSectionChange={setArchiveSection}
               loading={watchedLoading || profileLoading || streakLoading || Boolean(user && profileError)}
+              collectionsLoading={profileLoading}
+              collectionsError={user ? profileLoadError : ''}
               onSaveCollections={saveCollections}
               onOpenMovie={(movie) => { void openMovie(movie) }}
               onOpenWatchedMovie={(movie, viewingId) => { void openArchiveMovie(movie, viewingId) }}

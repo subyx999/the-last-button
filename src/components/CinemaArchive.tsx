@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { Movie, MovieCollection, MovieViewing } from '../types'
 import { imageUrl, searchMovies } from '../services/tmdb'
 import { getMovieViewings } from '../services/watchHistory'
@@ -20,6 +20,8 @@ interface CinemaArchiveProps {
   section: ArchiveSection
   onSectionChange: (section: ArchiveSection) => void
   loading: boolean
+  collectionsLoading: boolean
+  collectionsError: string
   onSaveCollections: (collections: MovieCollection[]) => Promise<boolean>
   onOpenMovie: (movie: Movie) => void
   onOpenWatchedMovie: (movie: Movie, viewingId?: string) => void
@@ -81,6 +83,8 @@ export default function CinemaArchive({
   section,
   onSectionChange,
   loading,
+  collectionsLoading,
+  collectionsError,
   onSaveCollections,
   onOpenMovie,
   onOpenWatchedMovie,
@@ -99,6 +103,7 @@ export default function CinemaArchive({
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState('')
   const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
   const [collectionFeedback, setCollectionFeedback] = useState<{ message: string; isError: boolean } | null>(null)
   const activeCollectionId = collections.some((collection) => collection.id === targetCollectionId)
     ? targetCollectionId
@@ -224,36 +229,46 @@ export default function CinemaArchive({
     }
   }, [movieSearch, section])
 
-  async function updateCollections(next: MovieCollection[], successMessage: string) {
-    if (saving) return
+  async function updateCollections(next: MovieCollection[], successMessage: string): Promise<boolean> {
+    if (savingRef.current) return false
+    if (collectionsError) {
+      setCollectionFeedback({ message: collectionsError, isError: true })
+      return false
+    }
+    savingRef.current = true
     setSaving(true)
     setCollectionFeedback(null)
     try {
       const saved = await onSaveCollections(next)
       setCollectionFeedback(saved
         ? { message: successMessage, isError: false }
-        : { message: 'Collection change could not be saved. Check the profile error above.', isError: true })
+        : { message: collectionsError || 'Collection change could not be saved. Check the profile error above, then try again.', isError: true })
+      return saved
     } catch (cause) {
       setCollectionFeedback({
         message: cause instanceof Error ? cause.message : 'Collection change could not be saved.',
         isError: true,
       })
+      return false
     } finally {
+      savingRef.current = false
       setSaving(false)
     }
   }
 
-  function createCollection(event: FormEvent<HTMLFormElement>) {
+  async function createCollection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (savingRef.current) return
     const name = collectionName.trim()
     if (!name) {
       setCollectionFeedback({ message: 'Give this collection a name before creating it.', isError: true })
       return
     }
     const newCollection: MovieCollection = { id: crypto.randomUUID(), name, movies: [] }
-    void updateCollections([...collections, newCollection], 'COLLECTION CREATED.')
-    setCollectionName('')
-    setTargetCollectionId(newCollection.id)
+    if (await updateCollections([...collections, newCollection], 'COLLECTION CREATED.')) {
+      setCollectionName('')
+      setTargetCollectionId(newCollection.id)
+    }
   }
 
   function addMovie(collection: MovieCollection, movie: Movie) {
@@ -529,13 +544,13 @@ export default function CinemaArchive({
           <header className="archive-section-heading"><span className="micro-label">CURATED BY YOU / NO RULES BUT YOURS</span><h2 id="archive-collections-title">Personal<br /><em>collections.</em></h2></header>
           <form className="archive-create-collection" onSubmit={createCollection}>
             <label htmlFor="new-collection-name">START A NEW FILE</label>
-            <div><input id="new-collection-name" value={collectionName} onChange={(event) => setCollectionName(event.target.value)} maxLength={60} placeholder="Rainy day cinema…" disabled={loading || saving} required /><button className="button button-dark" type="submit" disabled={loading || saving}>CREATE COLLECTION</button></div>
+            <div><input id="new-collection-name" value={collectionName} onChange={(event) => setCollectionName(event.target.value)} maxLength={60} placeholder="Rainy day cinema…" disabled={collectionsLoading || saving} required /><button className="button button-dark" type="submit" disabled={collectionsLoading || saving}>CREATE COLLECTION</button></div>
           </form>
           {collections.length > 0 && (
             <label className="archive-collection-target" htmlFor="collection-target"><span>ADD SEARCHED FILMS TO</span><select id="collection-target" value={activeCollectionId} onChange={(event) => setTargetCollectionId(event.target.value)}>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</select></label>
           )}
           <label className="archive-collection-search-label" htmlFor="collection-movie-search">FIND A FILM TO FILE</label>
-          <input className="archive-collection-search" id="collection-movie-search" type="search" value={movieSearch} onChange={(event) => setMovieSearch(event.target.value)} placeholder="Search the movie archive…" disabled={!collections.length || loading || saving} />
+          <input className="archive-collection-search" id="collection-movie-search" type="search" value={movieSearch} onChange={(event) => setMovieSearch(event.target.value)} placeholder="Search the movie archive…" disabled={!collections.length || collectionsLoading || saving} />
           {searching && <p className="settings-inline-status" role="status">SEARCHING TMDB…</p>}
           {searchError && <p className="settings-inline-error" role="alert">{searchError}</p>}
           {!searching && movieResults.length > 0 && activeCollectionId && (
@@ -543,7 +558,7 @@ export default function CinemaArchive({
               {movieResults.map((movie) => {
                 const target = collections.find((collection) => collection.id === activeCollectionId)
                 const alreadyAdded = target?.movies.some((saved) => saved.id === movie.id) ?? false
-                return <button type="button" className="archive-collection-search-result" key={movie.id} disabled={loading || saving || alreadyAdded} onClick={() => target && addMovie(target, movie)}>
+                return <button type="button" className="archive-collection-search-result" key={movie.id} disabled={collectionsLoading || saving || alreadyAdded} onClick={() => target && addMovie(target, movie)}>
                   {movie.poster_path ? <img src={imageUrl(movie.poster_path)} alt="" loading="lazy" /> : <span className="archive-poster-empty">NO<br />IMAGE</span>}
                   <span><strong>{movie.title}</strong><small>{yearOf(movie)}</small></span><span>{alreadyAdded ? 'FILED' : 'ADD +'}</span>
                 </button>
@@ -559,13 +574,13 @@ export default function CinemaArchive({
                     <span className="micro-label">COLLECTION / {String(index + 1).padStart(2, '0')} / {collection.movies.length} FILMS</span>
                     <div className="archive-collection-rename">
                       <label className="sr-only" htmlFor={`collection-name-${collection.id}`}>Collection name</label>
-                      <input id={`collection-name-${collection.id}`} value={renameDrafts[collection.id] ?? collection.name} maxLength={60} disabled={loading || saving} onChange={(event) => setRenameDrafts((drafts) => ({ ...drafts, [collection.id]: event.target.value }))} />
-                      <button type="button" className="text-button" disabled={loading || saving || !(renameDrafts[collection.id] ?? collection.name).trim() || (renameDrafts[collection.id] ?? collection.name).trim() === collection.name} onClick={() => {
+                      <input id={`collection-name-${collection.id}`} value={renameDrafts[collection.id] ?? collection.name} maxLength={60} disabled={collectionsLoading || saving} onChange={(event) => setRenameDrafts((drafts) => ({ ...drafts, [collection.id]: event.target.value }))} />
+                      <button type="button" className="text-button" disabled={collectionsLoading || saving || !(renameDrafts[collection.id] ?? collection.name).trim() || (renameDrafts[collection.id] ?? collection.name).trim() === collection.name} onClick={() => {
                         const name = (renameDrafts[collection.id] ?? collection.name).trim()
                         if (!name) return
                         void updateCollections(collections.map((item) => item.id === collection.id ? { ...item, name } : item), 'COLLECTION RENAMED.')
                       }}>SAVE NAME</button>
-                      <button type="button" className="text-button archive-collection-delete" disabled={loading || saving} onClick={() => {
+                      <button type="button" className="text-button archive-collection-delete" disabled={collectionsLoading || saving} onClick={() => {
                         if (window.confirm(`Delete “${collection.name}” and its collection only?`)) {
                           void updateCollections(collections.filter((item) => item.id !== collection.id), 'COLLECTION DELETED.')
                         }
@@ -578,7 +593,7 @@ export default function CinemaArchive({
                         <article className="archive-collection-film" key={movie.id}>
                           {poster(movie, onOpenMovie)}
                           <span className="profile-favorite-title">{movie.title}</span><span className="profile-favorite-year">{yearOf(movie)}</span>
-                          <button type="button" className="text-button" disabled={loading || saving} onClick={() => void updateCollections(collections.map((item) => item.id === collection.id ? { ...item, movies: item.movies.filter((saved) => saved.id !== movie.id) } : item), 'FILM REMOVED FROM COLLECTION.')}>REMOVE ×</button>
+                          <button type="button" className="text-button" disabled={collectionsLoading || saving} onClick={() => void updateCollections(collections.map((item) => item.id === collection.id ? { ...item, movies: item.movies.filter((saved) => saved.id !== movie.id) } : item), 'FILM REMOVED FROM COLLECTION.')}>REMOVE ×</button>
                         </article>
                       ))}
                     </div>

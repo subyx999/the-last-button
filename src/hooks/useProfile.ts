@@ -242,6 +242,7 @@ export function useProfile(userId: string | undefined) {
   const [profile, setProfile] = useState<ProfileData>(readLocalProfile)
   const [loading, setLoading] = useState(Boolean(userId))
   const [error, setError] = useState('')
+  const [loadError, setLoadError] = useState('')
   const profileRef = useRef(profile)
   const persistedProfileRef = useRef(profile)
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
@@ -254,6 +255,7 @@ export function useProfile(userId: string | undefined) {
   useEffect(() => {
     let active = true
     setError('')
+    setLoadError('')
     if (!userId) {
       const localProfile = readLocalProfile()
       persistedProfileRef.current = localProfile
@@ -263,7 +265,9 @@ export function useProfile(userId: string | undefined) {
     }
     if (!supabase) {
       setLoading(false)
-      setError('Profile sync is unavailable because Supabase is not configured.')
+      const message = 'Profile sync is unavailable because Supabase is not configured.'
+      setError(message)
+      setLoadError(message)
       return () => { active = false }
     }
 
@@ -334,11 +338,16 @@ export function useProfile(userId: string | undefined) {
       if (active) {
         persistedProfileRef.current = mergedProfile
         setCurrentProfile(mergedProfile)
+        setLoadError('')
       }
     }
 
     loadProfile().catch((cause: unknown) => {
-      if (active) setError(profileOperationError('load your profile', cause))
+      if (active) {
+        const message = profileOperationError('load your profile', cause)
+        setError(message)
+        setLoadError(message)
+      }
     }).finally(() => {
       if (active) setLoading(false)
     })
@@ -433,5 +442,5 @@ export function useProfile(userId: string | undefined) {
     }
   }
 
-  return { profile, loading, error, saveCollections, saveFavorites, saveTasteProfile, saveUsername, updateImage }
+  return { profile, loading, error, loadError, saveCollections, saveFavorites, saveTasteProfile, saveUsername, updateImage }
 }
